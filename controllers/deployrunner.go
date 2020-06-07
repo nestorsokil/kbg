@@ -173,10 +173,7 @@ func (r *DeployRunner) upgradeReplicaSet(ctx context.Context, rs *appsv1.Replica
 }
 
 func (r *DeployRunner) scaleInactive(ctx context.Context, rs *appsv1.ReplicaSet) error {
-	var scaleDownPercent int32 = 50 // default
-	if r.deploy.Spec.BackupScaleDownPercent != nil {
-		scaleDownPercent = *r.deploy.Spec.BackupScaleDownPercent
-	}
+	scaleDownPercent := *r.deploy.Spec.BackupScaleDownPercent
 	activeReplicas := *r.deploy.Spec.Replicas
 	inactiveReplicas := activeReplicas * (scaleDownPercent / 100.0)
 	rs.Spec.Replicas = &inactiveReplicas
