@@ -10,98 +10,115 @@ import (
 	v1 "k8s.io/api/core/v1"
 	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"time"
 )
 
-func Runner(log logr.Logger, client client.Client, deploy *clusterv1alpha1.BlueGreenDeployment) *DeployRunner {
-	return &DeployRunner{Client: client, Logger: log, deploy: deploy}
+func NewRunner(
+	ctx context.Context,
+	log logr.Logger,
+	client client.Client,
+	deploy *clusterv1alpha1.BlueGreenDeployment,
+) (*DeployRunner, error) {
+	activeReplicas := *deploy.Spec.Replicas
+	scaleDownPercent := *deploy.Spec.BackupScaleDownPercent
+	factor := float32(scaleDownPercent) / float32(100.0)
+	backupReplicas := int32(float32(activeReplicas) * factor)
+	runner := &DeployRunner{
+		Client:                client,
+		log:                   log,
+		deploy:                deploy,
+		activeReplicasDesired: &activeReplicas,
+		backupReplicasDesired: &backupReplicas,
+	}
+	if err := runner.ensureService(ctx); err != nil {
+		return nil, err
+	}
+	if err := runner.ensureReplicaSets(ctx); err != nil {
+		return nil, err
+	}
+	return runner, nil
 }
 
 // DeployRunner is a stateful B/G deployment helper
 type DeployRunner struct {
 	client.Client
-	logr.Logger
-
+	log    logr.Logger
 	deploy *clusterv1alpha1.BlueGreenDeployment
+
+	activeReplicasDesired *int32
+	backupReplicasDesired *int32
+
+	Svc    *v1.Service
+	Active *appsv1.ReplicaSet
+	Backup *appsv1.ReplicaSet
 }
 
-func (r *DeployRunner) Run(ctx context.Context) error {
-	svc, err := r.ensureService(ctx)
-	if err != nil {
-		return errors.Wrap(err, "unable to obtain Service")
-	}
-	activeRs, inactiveRs, err := r.ensureReplicaSets(ctx)
-	if err != nil {
-		return errors.Wrap(err, "unable to obtain ReplicaSets")
-	}
-	switch {
-	case podEquals(&activeRs.Spec.Template, &r.deploy.Spec.Template):
-		r.Logger.Info("No changes were detected, skipping")
-		return nil
-	// todo fix this case, gets triggered after regular BG and swaps back
-	case podEquals(&inactiveRs.Spec.Template, &r.deploy.Spec.Template):
-		// todo swap & scale can be a method
-		r.Logger.Info("New config matches inactive ReplicaSet, swapping")
-		if inactiveRs.Spec.Replicas != r.deploy.Spec.Replicas {
-			inactiveRs.Spec.Replicas = r.deploy.Spec.Replicas
-			if err := r.Client.Update(ctx, inactiveRs); err != nil {
-				return errors.Wrap(err, "unable to scale")
-			}
-		}
-		desiredInactive := r.inactiveReplicas(ctx)
-		if activeRs.Spec.Replicas != desiredInactive {
-			activeRs.Spec.Replicas = desiredInactive
-			if err := r.Client.Update(ctx, inactiveRs); err != nil {
-				return errors.Wrap(err, "unable to scale")
-			}
-		}
-
-		svc.Spec.Selector[LabelColor] = r.deploy.Status.ActiveColor
-		if err = r.Client.Update(ctx, svc); err != nil {
-			return errors.Wrap(err, "unable to swap")
-		}
-		return nil
-	default:
-		r.Logger.Info("New configuration detected, running B/G deployment")
-		newRs, err := r.rollOutToInactive(ctx, inactiveRs)
-		if err != nil {
-			return errors.Wrap(err, "unable to upgrade ReplicaSet")
-		}
-
-		// TODO initiate smoke tests here
-
-		svc.Spec.Selector[LabelColor] = newRs.Labels[LabelColor]
-		if err = r.Client.Update(ctx, svc); err != nil {
-			return errors.Wrap(err, "unable to scale inactive")
-		}
-
-		inactiveRs = activeRs
-		activeRs = newRs
-
-		r.deploy.Status.ActiveColor = newRs.Labels[LabelColor]
-		if err := r.Client.Status().Update(ctx, r.deploy); err != nil {
-			return errors.Wrap(err, "unable to update deploy status")
-		}
-
-		if err := r.scaleInactive(ctx, inactiveRs); err != nil {
-			// todo should this be non crit?
-			return errors.Wrap(err, "unable to scale inactive")
-		}
-		return nil
-	}
+// ActiveMatches returns true when active ReplicaSet matches desired Spec
+func (r *DeployRunner) ActiveMatches() bool {
+	return podEquals(&r.Active.Spec.Template, &r.deploy.Spec.Template)
 }
 
-func (r *DeployRunner) ensureService(ctx context.Context) (*v1.Service, error) {
+// ActiveMatches returns true when backup ReplicaSet matches desired Spec
+func (r *DeployRunner) BackupMatches() bool {
+	return podEquals(&r.Backup.Spec.Template, &r.deploy.Spec.Template)
+}
+
+func (r *DeployRunner) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired *int32) error {
+	rs.Spec.Replicas = desired
+	if err := r.Client.Update(ctx, rs); err != nil {
+		return errors.Wrap(err, "unable to scale")
+	}
+	return nil
+}
+
+func (r *DeployRunner) Swap(ctx context.Context) error {
+	newColor := clusterv1alpha1.ColorBlue
+	if r.Svc.Labels[LabelColor] == newColor {
+		newColor = clusterv1alpha1.ColorGreen
+	}
+	r.Svc.Labels[LabelColor] = newColor
+
+	if err := r.Client.Update(ctx, r.Svc); err != nil {
+		return errors.Wrap(err, "unable to Swap")
+	}
+
+	r.deploy.Status.ActiveColor = r.Active.Labels[LabelColor]
+	if err := r.Client.Status().Update(ctx, r.deploy); err != nil {
+		return errors.Wrap(err, "unable to update deploy status")
+	}
+	if r.Active.Spec.Replicas != r.backupReplicasDesired {
+		if err := r.Scale(ctx, r.Active, r.backupReplicasDesired); err != nil {
+			return errors.Wrap(err, "unable to scale")
+		}
+	}
+	return nil
+}
+
+func (r *DeployRunner) UpgradeBackup(ctx context.Context) error {
+	color := r.Backup.Labels[LabelColor]
+	if err := r.Client.Delete(ctx, r.Backup); err != nil {
+		return errors.Wrap(err, "failed to destroy stale ReplicaSet")
+	}
+	newRs, err := r.createReplicaSet(ctx, r.deploy.Spec.Replicas, color)
+	if err != nil {
+		return errors.Wrap(err, "failed to create new ReplicaSet")
+	}
+	r.Backup = newRs
+	return nil
+}
+
+func (r *DeployRunner) ensureService(ctx context.Context) error {
 	var deploy = r.deploy
-	var svc v1.Service
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, &svc); err != nil {
+	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, r.Svc); err != nil {
 		if !kuberrors.IsNotFound(err) {
-			return nil, err
+			return errors.Wrap(err, "could not get Svc")
 		}
-		r.Logger.Info("Service was not found, creating")
+		r.log.Info("Service was not found, creating")
 		svcSpec := deploy.Spec.Service.DeepCopy()
 		svcSpec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
-		svc = v1.Service{
+		r.Svc = &v1.Service{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "Service",
 				APIVersion: "v1",
@@ -112,45 +129,49 @@ func (r *DeployRunner) ensureService(ctx context.Context) (*v1.Service, error) {
 			},
 			Spec: *svcSpec,
 		}
-		if err := r.Client.Create(ctx, &svc); err != nil {
-			return nil, err
+		if err := r.Client.Create(ctx, r.Svc); err != nil {
+			return err
 		}
-		r.Logger.Info(fmt.Sprintf("New service %s/%s was created", svc.Namespace, svc.Name))
+		r.log.Info(fmt.Sprintf("New service %s/%s was created", r.Svc.Namespace, r.Svc.Name))
 	}
-	return &svc, nil
+	return nil
 }
 
-func (r *DeployRunner) ensureReplicaSets(ctx context.Context) (active, inactive *appsv1.ReplicaSet, err error) {
+func (r *DeployRunner) ensureReplicaSets(ctx context.Context) error {
 	for _, color := range []string{clusterv1alpha1.ColorBlue, clusterv1alpha1.ColorGreen} {
-		rs, err := r.getOrCreateRs(ctx, color)
-		if err != nil {
-			return nil, nil, err
-		}
-		if r.deploy.Status.ActiveColor == color {
-			active = rs
+		if rs, err := r.obtainReplicaSet(ctx, color); err != nil {
+			return err
 		} else {
-			inactive = rs
+			if r.deploy.Status.ActiveColor == color {
+				r.Active = rs
+			} else {
+				r.Backup = rs
+			}
 		}
 	}
-	return active, inactive, nil
+	return nil
 }
 
-func (r *DeployRunner) getOrCreateRs(ctx context.Context, color string) (*appsv1.ReplicaSet, error) {
+func (r *DeployRunner) obtainReplicaSet(ctx context.Context, color string) (*appsv1.ReplicaSet, error) {
 	var rs appsv1.ReplicaSet
 	coloredName := fmt.Sprintf("%s-%s", r.deploy.Name, color)
 	namespacedName := client.ObjectKey{Namespace: r.deploy.Namespace, Name: coloredName}
 	if err := r.Get(ctx, namespacedName, &rs); err != nil {
-		if kuberrors.IsNotFound(err) {
-			r.Logger.Info(fmt.Sprintf("ReplicaSet %s was not found, creating", namespacedName))
-			replicas := r.desiredReplicas(ctx, color)
-			return r.createRs(ctx, replicas, color)
+		if !kuberrors.IsNotFound(err) {
+			return nil, err
 		}
-		return nil, err
+		r.log.Info(fmt.Sprintf("ReplicaSet %s was not found, creating", namespacedName))
+		var replicas *int32
+		if color == r.deploy.Status.ActiveColor {
+			replicas = r.activeReplicasDesired
+		}
+		replicas = r.backupReplicasDesired
+		return r.createReplicaSet(ctx, replicas, color)
 	}
 	return &rs, nil
 }
 
-func (r *DeployRunner) createRs(ctx context.Context, replicas *int32, color string) (*appsv1.ReplicaSet, error) {
+func (r *DeployRunner) createReplicaSet(ctx context.Context, replicas *int32, color string) (*appsv1.ReplicaSet, error) {
 	coloredName := fmt.Sprintf("%s-%s", r.deploy.Name, color)
 	labels := map[string]string{
 		LabelName:  coloredName,
@@ -184,36 +205,25 @@ func (r *DeployRunner) createRs(ctx context.Context, replicas *int32, color stri
 	if err := r.Client.Create(ctx, &rs); err != nil {
 		return nil, err
 	}
-	r.Logger.Info(fmt.Sprintf("Created ReplicaSet %s/%s", rs.Namespace, rs.Name))
+	if err := r.awaitAllPods(ctx, &rs); err != nil {
+		r.log.Error(err, "Failed waiting for all replicas")
+	}
+	r.log.Info(fmt.Sprintf("Created ReplicaSet %s/%s", rs.Namespace, rs.Name))
 	return &rs, nil
 }
 
-func (r *DeployRunner) rollOutToInactive(ctx context.Context, rs *appsv1.ReplicaSet) (*appsv1.ReplicaSet, error) {
-	color := rs.Labels[LabelColor]
-	if err := r.Client.Delete(ctx, rs); err != nil {
-		return nil, err
-	}
-	return r.createRs(ctx, r.deploy.Spec.Replicas, color)
-}
-
-func (r *DeployRunner) scaleInactive(ctx context.Context, rs *appsv1.ReplicaSet) error {
-	rs.Spec.Replicas = r.inactiveReplicas(ctx)
-	return r.Client.Update(ctx, rs)
-}
-
-// todo i dont like the signature for these 2
-func (r *DeployRunner) desiredReplicas(ctx context.Context, color string) *int32 {
-	if color == r.deploy.Status.ActiveColor {
-		return r.deploy.Spec.Replicas
-	}
-	return r.inactiveReplicas(ctx)
-}
-func (r *DeployRunner) inactiveReplicas(ctx context.Context) *int32 {
-	scaleDownPercent := *r.deploy.Spec.BackupScaleDownPercent
-	activeReplicas := *r.deploy.Spec.Replicas
-	factor := float32(scaleDownPercent) / float32(100.0)
-	inactiveReplicas := int32(float32(activeReplicas) * factor)
-	return &inactiveReplicas
+func (r *DeployRunner) awaitAllPods(ctx context.Context, replicaSet *appsv1.ReplicaSet) error {
+	namespacedName := client.ObjectKey{Namespace: replicaSet.Namespace, Name: replicaSet.Name}
+	return wait.PollImmediate(100*time.Millisecond, 30*time.Second, func() (bool, error) {
+		var rs appsv1.ReplicaSet
+		err := r.Client.Get(ctx, namespacedName, &rs)
+		if err != nil {
+			return false, errors.Wrap(err, "failed to get ReplicaSet")
+		}
+		sameGeneration := rs.Status.ObservedGeneration >= replicaSet.Generation
+		samePodsNum := rs.Status.AvailableReplicas == *replicaSet.Spec.Replicas
+		return sameGeneration && samePodsNum, nil
+	})
 }
 
 // from github.com/kubernetes/kubernetes/staging/src/k8s.io/kubectl/pkg/util/deployment/deployment.go

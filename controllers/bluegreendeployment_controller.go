@@ -55,13 +55,34 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 		log.Error(err, "unable to obtain BlueGreenDeployment")
 		return ctrl.Result{}, err
 	}
-
-	if err := Runner(log, r.Client, deploy).Run(ctx); err != nil {
+	rn, err := NewRunner(ctx, log, r.Client, deploy)
+	if err != nil {
 		log.Error(err, "Failed to reconcile")
 		return ctrl.Result{}, err
 	}
 
-	return ctrl.Result{}, nil
+	switch {
+	case rn.ActiveMatches():
+		log.Info("No changes were detected, skipping")
+		return ctrl.Result{}, nil
+	case rn.BackupMatches():
+		log.Info("New config matches backup ReplicaSet, swapping")
+		if rn.Backup.Spec.Replicas != deploy.Spec.Replicas {
+			if err := rn.Scale(ctx, rn.Backup, rn.deploy.Spec.Replicas); err != nil {
+				return ctrl.Result{}, errors.Wrap(err, "unable to scale")
+			}
+		}
+		return ctrl.Result{}, errors.Wrap(rn.Swap(ctx), "failed to swap service")
+	default:
+		log.Info("New configuration detected, running B/G deployment")
+		if err := rn.UpgradeBackup(ctx); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "unable to upgrade ReplicaSet")
+		}
+
+		// TODO initiate smoke tests here
+
+		return ctrl.Result{}, errors.Wrap(rn.Swap(ctx), "failed to swap service")
+	}
 }
 
 func (r *BlueGreenDeploymentReconciler) obtainDeployment(ctx context.Context, name types.NamespacedName) (*clusterv1alpha1.BlueGreenDeployment, error) {
