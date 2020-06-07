@@ -55,7 +55,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 		log.Error(err, "unable to obtain BlueGreenDeployment")
 		return ctrl.Result{}, err
 	}
-	rn, err := NewRunner(ctx, log, r.Client, deploy)
+	rn, err := NewEngine(ctx, log, r.Client, deploy)
 	if err != nil {
 		log.Error(err, "Failed to reconcile")
 		return ctrl.Result{}, err
