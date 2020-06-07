@@ -1,0 +1,7 @@
+apiVersion: cluster.kbg/v1alpha1
+kind: BlueGreenDeployment
+metadata:
+  name: bluegreendeployment-sample
+spec:
+  # Add fields here
+  foo: bar

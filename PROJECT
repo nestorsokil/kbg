@@ -1,3 +1,7 @@
 domain: kbg
 repo: github.com/nestorsokil/kbg
+resources:
+- group: cluster
+  kind: BlueGreenDeployment
+  version: v1alpha1
 version: "2"

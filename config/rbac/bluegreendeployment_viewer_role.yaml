@@ -1,0 +1,20 @@
+# permissions for end users to view bluegreendeployments.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bluegreendeployment-viewer-role
+rules:
+- apiGroups:
+  - cluster.kbg
+  resources:
+  - bluegreendeployments
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - cluster.kbg
+  resources:
+  - bluegreendeployments/status
+  verbs:
+  - get

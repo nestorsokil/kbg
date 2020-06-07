@@ -1,0 +1,24 @@
+# permissions for end users to edit bluegreendeployments.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: bluegreendeployment-editor-role
+rules:
+- apiGroups:
+  - cluster.kbg
+  resources:
+  - bluegreendeployments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - cluster.kbg
+  resources:
+  - bluegreendeployments/status
+  verbs:
+  - get
