@@ -10,42 +10,59 @@ import (
 	v1 "k8s.io/api/core/v1"
 	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"time"
+)
+
+var (
+	ErrDeleted = errors.New("deployment was deleted")
 )
 
 func NewEngine(
 	ctx context.Context,
 	log logr.Logger,
 	client client.Client,
-	deploy *clusterv1alpha1.BlueGreenDeployment,
+	req ctrl.Request,
 ) (*DeployEngine, error) {
-	activeReplicas := *deploy.Spec.Replicas
-	scaleDownPercent := *deploy.Spec.BackupScaleDownPercent
+	engine := &DeployEngine{
+		Client: client,
+		log:    log,
+	}
+	if err := engine.ensureDeployment(ctx, req.NamespacedName); err != nil {
+		if kuberrors.IsNotFound(err) {
+			log.Info(fmt.Sprintf("Deployment %s was deleted, cleaning up", req.NamespacedName))
+			// todo delete svc, rss
+
+			return nil, ErrDeleted
+		}
+
+		return nil, errors.Wrap(err, "failed to obtain deployment")
+	}
+
+	activeReplicas := *engine.Deploy.Spec.Replicas
+	scaleDownPercent := *engine.Deploy.Spec.BackupScaleDownPercent
 	factor := float32(scaleDownPercent) / float32(100.0)
 	backupReplicas := int32(float32(activeReplicas) * factor)
-	runner := &DeployEngine{
-		Client:                client,
-		log:                   log,
-		deploy:                deploy,
-		activeReplicasDesired: &activeReplicas,
-		backupReplicasDesired: &backupReplicas,
-	}
-	if err := runner.ensureService(ctx); err != nil {
+
+	engine.activeReplicasDesired = &activeReplicas
+	engine.backupReplicasDesired = &backupReplicas
+
+	if err := engine.ensureService(ctx); err != nil {
 		return nil, err
 	}
-	if err := runner.ensureReplicaSets(ctx); err != nil {
+	if err := engine.ensureReplicaSets(ctx); err != nil {
 		return nil, err
 	}
-	return runner, nil
+	return engine, nil
 }
 
 // DeployEngine is a stateful B/G deployment helper
 type DeployEngine struct {
 	client.Client
-	log    logr.Logger
-	deploy *clusterv1alpha1.BlueGreenDeployment
+	log logr.Logger
 
 	activeReplicasDesired *int32
 	backupReplicasDesired *int32
@@ -53,16 +70,17 @@ type DeployEngine struct {
 	Svc    *v1.Service
 	Active *appsv1.ReplicaSet
 	Backup *appsv1.ReplicaSet
+	Deploy *clusterv1alpha1.BlueGreenDeployment
 }
 
 // ActiveMatches returns true when active ReplicaSet matches desired Spec
 func (e *DeployEngine) ActiveMatches() bool {
-	return podEquals(&e.Active.Spec.Template, &e.deploy.Spec.Template)
+	return podEquals(&e.Active.Spec.Template, &e.Deploy.Spec.Template)
 }
 
 // ActiveMatches returns true when backup ReplicaSet matches desired Spec
 func (e *DeployEngine) BackupMatches() bool {
-	return podEquals(&e.Backup.Spec.Template, &e.deploy.Spec.Template)
+	return podEquals(&e.Backup.Spec.Template, &e.Deploy.Spec.Template)
 }
 
 func (e *DeployEngine) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired *int32) error {
@@ -84,8 +102,8 @@ func (e *DeployEngine) Swap(ctx context.Context) error {
 		return errors.Wrap(err, "unable to Swap")
 	}
 
-	e.deploy.Status.ActiveColor = e.Active.Labels[LabelColor]
-	if err := e.Client.Status().Update(ctx, e.deploy); err != nil {
+	e.Deploy.Status.ActiveColor = e.Active.Labels[LabelColor]
+	if err := e.Client.Status().Update(ctx, e.Deploy); err != nil {
 		return errors.Wrap(err, "unable to update deploy status")
 	}
 	if e.Active.Spec.Replicas != e.backupReplicasDesired {
@@ -101,7 +119,7 @@ func (e *DeployEngine) UpgradeBackup(ctx context.Context) error {
 	if err := e.Client.Delete(ctx, e.Backup); err != nil {
 		return errors.Wrap(err, "failed to destroy stale ReplicaSet")
 	}
-	newRs, err := e.createReplicaSet(ctx, e.deploy.Spec.Replicas, color)
+	newRs, err := e.createReplicaSet(ctx, e.Deploy.Spec.Replicas, color)
 	if err != nil {
 		return errors.Wrap(err, "failed to create new ReplicaSet")
 	}
@@ -109,15 +127,31 @@ func (e *DeployEngine) UpgradeBackup(ctx context.Context) error {
 	return nil
 }
 
+func (e *DeployEngine) ensureDeployment(ctx context.Context, name types.NamespacedName) error {
+	var deploy clusterv1alpha1.BlueGreenDeployment
+	if err := e.Client.Get(ctx, name, &deploy); err != nil {
+		return err
+	}
+	if deploy.Status.ActiveColor == "" {
+		e.log.Info("No color set for deployment, updating")
+		deploy.Status.ActiveColor = clusterv1alpha1.ColorBlue
+		if err := e.Client.Status().Update(ctx, &deploy); err != nil {
+			return errors.Wrap(err, "failed to set color")
+		}
+	}
+	e.Deploy = &deploy
+	return nil
+}
+
 func (e *DeployEngine) ensureService(ctx context.Context) error {
 	var svc v1.Service
-	key := client.ObjectKey{Namespace: e.deploy.Namespace, Name: e.deploy.Name}
+	key := client.ObjectKey{Namespace: e.Deploy.Namespace, Name: e.Deploy.Name}
 	if err := e.Get(ctx, key, &svc); err != nil {
 		if !kuberrors.IsNotFound(err) {
 			return errors.Wrap(err, "could not get Svc")
 		}
 		e.log.Info("Service was not found, creating")
-		svcSpec := e.deploy.Spec.Service.DeepCopy()
+		svcSpec := e.Deploy.Spec.Service.DeepCopy()
 		svcSpec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
 		svc = v1.Service{
 			TypeMeta: metav1.TypeMeta{
@@ -125,8 +159,8 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 				APIVersion: "v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      e.deploy.Name,
-				Namespace: e.deploy.Namespace,
+				Name:      e.Deploy.Name,
+				Namespace: e.Deploy.Namespace,
 			},
 			Spec: *svcSpec,
 		}
@@ -144,7 +178,7 @@ func (e *DeployEngine) ensureReplicaSets(ctx context.Context) error {
 		if rs, err := e.obtainReplicaSet(ctx, color); err != nil {
 			return err
 		} else {
-			if e.deploy.Status.ActiveColor == color {
+			if e.Deploy.Status.ActiveColor == color {
 				e.Active = rs
 			} else {
 				e.Backup = rs
@@ -156,15 +190,15 @@ func (e *DeployEngine) ensureReplicaSets(ctx context.Context) error {
 
 func (e *DeployEngine) obtainReplicaSet(ctx context.Context, color string) (*appsv1.ReplicaSet, error) {
 	var rs appsv1.ReplicaSet
-	coloredName := fmt.Sprintf("%s-%s", e.deploy.Name, color)
-	namespacedName := client.ObjectKey{Namespace: e.deploy.Namespace, Name: coloredName}
+	coloredName := fmt.Sprintf("%s-%s", e.Deploy.Name, color)
+	namespacedName := client.ObjectKey{Namespace: e.Deploy.Namespace, Name: coloredName}
 	if err := e.Get(ctx, namespacedName, &rs); err != nil {
 		if !kuberrors.IsNotFound(err) {
 			return nil, err
 		}
 		e.log.Info(fmt.Sprintf("ReplicaSet %s was not found, creating", namespacedName))
 		var replicas *int32
-		if color == e.deploy.Status.ActiveColor {
+		if color == e.Deploy.Status.ActiveColor {
 			replicas = e.activeReplicasDesired
 		} else {
 			replicas = e.backupReplicasDesired
@@ -175,12 +209,12 @@ func (e *DeployEngine) obtainReplicaSet(ctx context.Context, color string) (*app
 }
 
 func (e *DeployEngine) createReplicaSet(ctx context.Context, replicas *int32, color string) (*appsv1.ReplicaSet, error) {
-	coloredName := fmt.Sprintf("%s-%s", e.deploy.Name, color)
+	coloredName := fmt.Sprintf("%s-%s", e.Deploy.Name, color)
 	labels := map[string]string{
 		LabelName:  coloredName,
 		LabelColor: color,
 	}
-	podTemplate := e.deploy.Spec.Template
+	podTemplate := e.Deploy.Spec.Template
 	if podTemplate.ObjectMeta.Labels == nil {
 		podTemplate.ObjectMeta.Labels = make(map[string]string)
 	}
@@ -194,7 +228,7 @@ func (e *DeployEngine) createReplicaSet(ctx context.Context, replicas *int32, co
 		},
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      coloredName,
-			Namespace: e.deploy.Namespace,
+			Namespace: e.Deploy.Namespace,
 			Labels:    labels,
 		},
 		Spec: appsv1.ReplicaSetSpec{

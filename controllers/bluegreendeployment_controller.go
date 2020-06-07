@@ -20,7 +20,6 @@ import (
 	"context"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
-	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -45,18 +44,14 @@ type BlueGreenDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=cluster.kbg,resources=bluegreendeployments/status,verbs=get;update;patch
 func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
-	log := r.Log.WithValues("bluegreendeployment", req.NamespacedName)
-	deploy, err := r.obtainDeployment(ctx, req.NamespacedName)
+	log := r.Log.WithValues(
+		"bluegreendeployment", req.NamespacedName)
+
+	rn, err := NewEngine(ctx, log, r.Client, req)
 	if err != nil {
-		if kuberrors.IsNotFound(err) {
-			log.Info("BlueGreenDeployment was deleted") // probably...
+		if err == ErrDeleted {
 			return ctrl.Result{}, nil
 		}
-		log.Error(err, "unable to obtain BlueGreenDeployment")
-		return ctrl.Result{}, err
-	}
-	rn, err := NewEngine(ctx, log, r.Client, deploy)
-	if err != nil {
 		log.Error(err, "Failed to reconcile")
 		return ctrl.Result{}, err
 	}
@@ -67,8 +62,8 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 		return ctrl.Result{}, nil
 	case rn.BackupMatches():
 		log.Info("New config matches backup ReplicaSet, swapping")
-		if rn.Backup.Spec.Replicas != deploy.Spec.Replicas {
-			if err := rn.Scale(ctx, rn.Backup, rn.deploy.Spec.Replicas); err != nil {
+		if rn.Backup.Spec.Replicas != rn.Deploy.Spec.Replicas {
+			if err := rn.Scale(ctx, rn.Backup, rn.Deploy.Spec.Replicas); err != nil {
 				return ctrl.Result{}, errors.Wrap(err, "unable to scale")
 			}
 		}
