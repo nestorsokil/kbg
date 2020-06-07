@@ -1,7 +1,22 @@
 apiVersion: cluster.kbg/v1alpha1
 kind: BlueGreenDeployment
 metadata:
-  name: bluegreendeployment-sample
+  name: myserver
 spec:
-  # Add fields here
-  foo: bar
+  replicas: 2
+  backupScaleDownPercent: 50
+  service:
+    type: NodePort
+    ports:
+      - name: http
+        port: 80
+        targetPort: 80
+        protocol: TCP
+  template:
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.19.0
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80

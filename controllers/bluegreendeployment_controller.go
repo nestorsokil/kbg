@@ -20,6 +20,7 @@ import (
 	"context"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -48,6 +49,10 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 
 	deploy, err := r.obtainDeployment(ctx, req.NamespacedName)
 	if err != nil {
+		if kuberrors.IsNotFound(err) {
+			log.Info("BlueGreenDeployment was deleted") // probably...
+			return ctrl.Result{}, nil
+		}
 		log.Error(err, "unable to obtain BlueGreenDeployment")
 		return ctrl.Result{}, err
 	}

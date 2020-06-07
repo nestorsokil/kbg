@@ -43,8 +43,8 @@ const (
 )
 
 const (
-	ColorBlue  = "Blue"
-	ColorGreen = "Green"
+	ColorBlue  = "blue"
+	ColorGreen = "green"
 )
 
 // BlueGreenDeploymentStatus defines the observed state of BlueGreenDeployment
