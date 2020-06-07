@@ -58,6 +58,7 @@ type BlueGreenDeploymentStatus struct {
 // +kubebuilder:object:root=true
 
 // BlueGreenDeployment is the Schema for the bluegreendeployments API
+// +kubebuilder:resource:shortName=bgd
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
 type BlueGreenDeployment struct {

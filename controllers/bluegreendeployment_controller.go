@@ -46,7 +46,6 @@ type BlueGreenDeploymentReconciler struct {
 func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
 	ctx := context.Background()
 	log := r.Log.WithValues("bluegreendeployment", req.NamespacedName)
-
 	deploy, err := r.obtainDeployment(ctx, req.NamespacedName)
 	if err != nil {
 		if kuberrors.IsNotFound(err) {
@@ -68,11 +67,12 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 func (r *BlueGreenDeploymentReconciler) obtainDeployment(ctx context.Context, name types.NamespacedName) (*clusterv1alpha1.BlueGreenDeployment, error) {
 	var deploy clusterv1alpha1.BlueGreenDeployment
 	if err := r.Get(ctx, name, &deploy); err != nil {
-		return nil, errors.Wrap(err, "failed to Get deploy")
+		return nil, err
 	}
 	if deploy.Status.ActiveColor == "" {
+		r.Log.Info("No color set for deployment, updating")
 		deploy.Status.ActiveColor = clusterv1alpha1.ColorBlue
-		if err := r.Client.Update(ctx, &deploy); err != nil {
+		if err := r.Client.Status().Update(ctx, &deploy); err != nil {
 			return nil, errors.Wrap(err, "failed to set color")
 		}
 	}

@@ -26,11 +26,11 @@ type DeployRunner struct {
 }
 
 func (r *DeployRunner) Run(ctx context.Context) error {
-	svc, err := r.obtainService(ctx)
+	svc, err := r.ensureService(ctx)
 	if err != nil {
 		return errors.Wrap(err, "unable to obtain Service")
 	}
-	activeRs, inactiveRs, err := r.obtainReplicaSets(ctx)
+	activeRs, inactiveRs, err := r.ensureReplicaSets(ctx)
 	if err != nil {
 		return errors.Wrap(err, "unable to obtain ReplicaSets")
 	}
@@ -39,31 +39,31 @@ func (r *DeployRunner) Run(ctx context.Context) error {
 		r.Logger.Info("No changes were detected, skipping")
 		return nil
 	// todo fix this case, gets triggered after regular BG and swaps back
-	//case podEquals(&inactiveRs.Spec.Template, &r.deploy.Spec.Template):
-	//	// todo swap & scale can be a method
-	//	r.Logger.Info("New config matches inactive ReplicaSet, swapping")
-	//	if inactiveRs.Spec.Replicas != r.deploy.Spec.Replicas {
-	//		inactiveRs.Spec.Replicas = r.deploy.Spec.Replicas
-	//		if err := r.Client.Update(ctx, inactiveRs); err != nil {
-	//			return errors.Wrap(err, "unable to scale")
-	//		}
-	//	}
-	//	desiredInactive := r.inactiveReplicas(ctx)
-	//	if activeRs.Spec.Replicas != desiredInactive {
-	//		activeRs.Spec.Replicas = desiredInactive
-	//		if err := r.Client.Update(ctx, inactiveRs); err != nil {
-	//			return errors.Wrap(err, "unable to scale")
-	//		}
-	//	}
-	//
-	//	svc.Spec.Selector[LabelColor] = r.deploy.Status.ActiveColor
-	//	if err = r.Client.Update(ctx, svc); err != nil {
-	//		return errors.Wrap(err, "unable to swap")
-	//	}
-	//	return nil
+	case podEquals(&inactiveRs.Spec.Template, &r.deploy.Spec.Template):
+		// todo swap & scale can be a method
+		r.Logger.Info("New config matches inactive ReplicaSet, swapping")
+		if inactiveRs.Spec.Replicas != r.deploy.Spec.Replicas {
+			inactiveRs.Spec.Replicas = r.deploy.Spec.Replicas
+			if err := r.Client.Update(ctx, inactiveRs); err != nil {
+				return errors.Wrap(err, "unable to scale")
+			}
+		}
+		desiredInactive := r.inactiveReplicas(ctx)
+		if activeRs.Spec.Replicas != desiredInactive {
+			activeRs.Spec.Replicas = desiredInactive
+			if err := r.Client.Update(ctx, inactiveRs); err != nil {
+				return errors.Wrap(err, "unable to scale")
+			}
+		}
+
+		svc.Spec.Selector[LabelColor] = r.deploy.Status.ActiveColor
+		if err = r.Client.Update(ctx, svc); err != nil {
+			return errors.Wrap(err, "unable to swap")
+		}
+		return nil
 	default:
 		r.Logger.Info("New configuration detected, running B/G deployment")
-		newRs, err := r.upgradeReplicaSet(ctx, inactiveRs)
+		newRs, err := r.rollOutToInactive(ctx, inactiveRs)
 		if err != nil {
 			return errors.Wrap(err, "unable to upgrade ReplicaSet")
 		}
@@ -79,7 +79,7 @@ func (r *DeployRunner) Run(ctx context.Context) error {
 		activeRs = newRs
 
 		r.deploy.Status.ActiveColor = newRs.Labels[LabelColor]
-		if err := r.Client.Update(ctx, r.deploy); err != nil {
+		if err := r.Client.Status().Update(ctx, r.deploy); err != nil {
 			return errors.Wrap(err, "unable to update deploy status")
 		}
 
@@ -91,13 +91,14 @@ func (r *DeployRunner) Run(ctx context.Context) error {
 	}
 }
 
-func (r *DeployRunner) obtainService(ctx context.Context) (*v1.Service, error) {
+func (r *DeployRunner) ensureService(ctx context.Context) (*v1.Service, error) {
 	var deploy = r.deploy
 	var svc v1.Service
 	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, &svc); err != nil {
 		if !kuberrors.IsNotFound(err) {
 			return nil, err
 		}
+		r.Logger.Info("Service was not found, creating")
 		svcSpec := deploy.Spec.Service.DeepCopy()
 		svcSpec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
 		svc = v1.Service{
@@ -114,11 +115,12 @@ func (r *DeployRunner) obtainService(ctx context.Context) (*v1.Service, error) {
 		if err := r.Client.Create(ctx, &svc); err != nil {
 			return nil, err
 		}
+		r.Logger.Info(fmt.Sprintf("New service %s/%s was created", svc.Namespace, svc.Name))
 	}
 	return &svc, nil
 }
 
-func (r *DeployRunner) obtainReplicaSets(ctx context.Context) (active, inactive *appsv1.ReplicaSet, err error) {
+func (r *DeployRunner) ensureReplicaSets(ctx context.Context) (active, inactive *appsv1.ReplicaSet, err error) {
 	for _, color := range []string{clusterv1alpha1.ColorBlue, clusterv1alpha1.ColorGreen} {
 		rs, err := r.getOrCreateRs(ctx, color)
 		if err != nil {
@@ -139,14 +141,16 @@ func (r *DeployRunner) getOrCreateRs(ctx context.Context, color string) (*appsv1
 	namespacedName := client.ObjectKey{Namespace: r.deploy.Namespace, Name: coloredName}
 	if err := r.Get(ctx, namespacedName, &rs); err != nil {
 		if kuberrors.IsNotFound(err) {
-			return r.createRs(ctx, color)
+			r.Logger.Info(fmt.Sprintf("ReplicaSet %s was not found, creating", namespacedName))
+			replicas := r.desiredReplicas(ctx, color)
+			return r.createRs(ctx, replicas, color)
 		}
 		return nil, err
 	}
 	return &rs, nil
 }
 
-func (r *DeployRunner) createRs(ctx context.Context, color string) (*appsv1.ReplicaSet, error) {
+func (r *DeployRunner) createRs(ctx context.Context, replicas *int32, color string) (*appsv1.ReplicaSet, error) {
 	coloredName := fmt.Sprintf("%s-%s", r.deploy.Name, color)
 	labels := map[string]string{
 		LabelName:  coloredName,
@@ -159,7 +163,6 @@ func (r *DeployRunner) createRs(ctx context.Context, color string) (*appsv1.Repl
 	for k, v := range labels {
 		podTemplate.ObjectMeta.Labels[k] = v
 	}
-	replicas := r.desiredReplicas(ctx, color)
 	rs := appsv1.ReplicaSet{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "ReplicaSet",
@@ -181,15 +184,16 @@ func (r *DeployRunner) createRs(ctx context.Context, color string) (*appsv1.Repl
 	if err := r.Client.Create(ctx, &rs); err != nil {
 		return nil, err
 	}
+	r.Logger.Info(fmt.Sprintf("Created ReplicaSet %s/%s", rs.Namespace, rs.Name))
 	return &rs, nil
 }
 
-func (r *DeployRunner) upgradeReplicaSet(ctx context.Context, rs *appsv1.ReplicaSet) (*appsv1.ReplicaSet, error) {
+func (r *DeployRunner) rollOutToInactive(ctx context.Context, rs *appsv1.ReplicaSet) (*appsv1.ReplicaSet, error) {
 	color := rs.Labels[LabelColor]
 	if err := r.Client.Delete(ctx, rs); err != nil {
 		return nil, err
 	}
-	return r.createRs(ctx, color)
+	return r.createRs(ctx, r.deploy.Spec.Replicas, color)
 }
 
 func (r *DeployRunner) scaleInactive(ctx context.Context, rs *appsv1.ReplicaSet) error {
