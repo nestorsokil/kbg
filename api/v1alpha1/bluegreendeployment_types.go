@@ -61,6 +61,7 @@ type BlueGreenDeploymentStatus struct {
 // +kubebuilder:resource:shortName=bgd
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
+// +kubebuilder:printcolumn:name="Color",type=string,JSONPath=`.status.activeColor`
 type BlueGreenDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`
