@@ -75,10 +75,10 @@ func (r *DeployRunner) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired
 
 func (r *DeployRunner) Swap(ctx context.Context) error {
 	newColor := clusterv1alpha1.ColorBlue
-	if r.Svc.Labels[LabelColor] == newColor {
+	if r.Svc.Spec.Selector[LabelColor] == newColor {
 		newColor = clusterv1alpha1.ColorGreen
 	}
-	r.Svc.Labels[LabelColor] = newColor
+	r.Svc.Spec.Selector[LabelColor] = newColor
 
 	if err := r.Client.Update(ctx, r.Svc); err != nil {
 		return errors.Wrap(err, "unable to Swap")
@@ -110,30 +110,32 @@ func (r *DeployRunner) UpgradeBackup(ctx context.Context) error {
 }
 
 func (r *DeployRunner) ensureService(ctx context.Context) error {
-	var deploy = r.deploy
-	if err := r.Get(ctx, client.ObjectKey{Namespace: deploy.Namespace, Name: deploy.Name}, r.Svc); err != nil {
+	var svc v1.Service
+	key := client.ObjectKey{Namespace: r.deploy.Namespace, Name: r.deploy.Name}
+	if err := r.Get(ctx, key, &svc); err != nil {
 		if !kuberrors.IsNotFound(err) {
 			return errors.Wrap(err, "could not get Svc")
 		}
 		r.log.Info("Service was not found, creating")
-		svcSpec := deploy.Spec.Service.DeepCopy()
+		svcSpec := r.deploy.Spec.Service.DeepCopy()
 		svcSpec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
-		r.Svc = &v1.Service{
+		svc = v1.Service{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "Service",
 				APIVersion: "v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      deploy.Name,
-				Namespace: deploy.Namespace,
+				Name:      r.deploy.Name,
+				Namespace: r.deploy.Namespace,
 			},
 			Spec: *svcSpec,
 		}
-		if err := r.Client.Create(ctx, r.Svc); err != nil {
+		if err := r.Client.Create(ctx, &svc); err != nil {
 			return err
 		}
-		r.log.Info(fmt.Sprintf("New service %s/%s was created", r.Svc.Namespace, r.Svc.Name))
+		r.log.Info(fmt.Sprintf("New service %s/%s was created", svc.Namespace, svc.Name))
 	}
+	r.Svc = &svc
 	return nil
 }
 
@@ -164,8 +166,9 @@ func (r *DeployRunner) obtainReplicaSet(ctx context.Context, color string) (*app
 		var replicas *int32
 		if color == r.deploy.Status.ActiveColor {
 			replicas = r.activeReplicasDesired
+		} else {
+			replicas = r.backupReplicasDesired
 		}
-		replicas = r.backupReplicasDesired
 		return r.createReplicaSet(ctx, replicas, color)
 	}
 	return &rs, nil
@@ -206,6 +209,10 @@ func (r *DeployRunner) createReplicaSet(ctx context.Context, replicas *int32, co
 		return nil, err
 	}
 	if err := r.awaitAllPods(ctx, &rs); err != nil {
+		// todo this happened a couple of times, need to fix
+		//ERROR   controllers.BlueGreenDeployment Failed waiting for all replicas {"bluegreendeployment":
+		//"test/myserver", "error": "failed to get ReplicaSet: ReplicaSet.apps \"myserver-green\" not found",
+		//"errorVerbose": "ReplicaSet.apps \"myserver-green\" not found\nfailed to get ReplicaSet
 		r.log.Error(err, "Failed waiting for all replicas")
 	}
 	r.log.Info(fmt.Sprintf("Created ReplicaSet %s/%s", rs.Namespace, rs.Name))
