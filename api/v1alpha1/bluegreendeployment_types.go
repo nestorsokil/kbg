@@ -47,6 +47,10 @@ const (
 	ColorGreen = "green"
 )
 
+var (
+	Colors = []string{ColorBlue, ColorGreen}
+)
+
 // BlueGreenDeploymentStatus defines the observed state of BlueGreenDeployment
 type BlueGreenDeploymentStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file

@@ -34,8 +34,7 @@ func NewEngine(
 	if err := engine.ensureDeployment(ctx, req.NamespacedName); err != nil {
 		if kuberrors.IsNotFound(err) {
 			log.Info(fmt.Sprintf("Deployment %s was deleted, cleaning up", req.NamespacedName))
-			// todo delete svc, rss
-
+			engine.cleanup(ctx, req.NamespacedName)
 			return nil, ErrDeleted
 		}
 
@@ -174,7 +173,7 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 }
 
 func (e *DeployEngine) ensureReplicaSets(ctx context.Context) error {
-	for _, color := range []string{clusterv1alpha1.ColorBlue, clusterv1alpha1.ColorGreen} {
+	for _, color := range clusterv1alpha1.Colors {
 		if rs, err := e.obtainReplicaSet(ctx, color); err != nil {
 			return err
 		} else {
@@ -251,6 +250,26 @@ func (e *DeployEngine) createReplicaSet(ctx context.Context, replicas *int32, co
 	}
 	e.log.Info(fmt.Sprintf("Created ReplicaSet %s/%s", rs.Namespace, rs.Name))
 	return &rs, nil
+}
+
+// meh, hacks
+func (e *DeployEngine) cleanup(ctx context.Context, name types.NamespacedName) {
+	var svc v1.Service
+	if err := e.Client.Get(ctx, name, &svc); err != nil {
+		e.log.Error(err, "Failed to lookup service")
+	} else if err := e.Client.Delete(ctx, &svc); err != nil {
+		e.log.Error(err, "Failed to delete service")
+	}
+	for _, color := range clusterv1alpha1.Colors {
+		var rs appsv1.ReplicaSet
+		coloredName := fmt.Sprintf("%s-%s", name.Name, color)
+		namespacedName := client.ObjectKey{Namespace: name.Namespace, Name: coloredName}
+		if err := e.Client.Get(ctx, namespacedName, &rs); err != nil {
+			e.log.Error(err, "Failed to lookup replicaset")
+		} else if err := e.Client.Delete(ctx, &rs); err != nil {
+			e.log.Error(err, "Failed to delete replicaset")
+		}
+	}
 }
 
 func (e *DeployEngine) awaitAllPods(ctx context.Context, replicaSet *appsv1.ReplicaSet) error {
