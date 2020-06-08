@@ -21,6 +21,8 @@ var (
 	ErrDeleted = errors.New("deployment was deleted")
 )
 
+// TODO all updates should be retriable!
+
 func NewEngine(
 	ctx context.Context,
 	log logr.Logger,
@@ -28,10 +30,11 @@ func NewEngine(
 	req ctrl.Request,
 ) (*DeployEngine, error) {
 	engine := &DeployEngine{
-		Client: client,
-		log:    log,
+		Client:     client,
+		log:        log,
+		deployName: req.NamespacedName,
 	}
-	if err := engine.ensureDeployment(ctx, req.NamespacedName); err != nil {
+	if err := engine.getDeployment(ctx); err != nil {
 		if kuberrors.IsNotFound(err) {
 			log.Info(fmt.Sprintf("Deployment %s was deleted, cleaning up", req.NamespacedName))
 			engine.cleanup(ctx, req.NamespacedName)
@@ -55,6 +58,22 @@ func NewEngine(
 	if err := engine.ensureReplicaSets(ctx); err != nil {
 		return nil, err
 	}
+
+	if err := engine.Get(ctx, engine.deployName, engine.Deploy); err != nil {
+		return nil, err
+	}
+
+	// todo this should be .AvailableReplicas, but awaitPods crashes too much
+	if engine.Deploy.Status.ActiveReplicas != engine.Active.Status.Replicas {
+		engine.Deploy.Status.ActiveReplicas = engine.Active.Status.Replicas
+	}
+	if engine.Deploy.Status.BackupReplicas != engine.Backup.Status.Replicas {
+		engine.Deploy.Status.BackupReplicas = engine.Backup.Status.Replicas
+	}
+	if err := engine.Update(ctx, engine.Deploy); err != nil {
+		return nil, err
+	}
+
 	return engine, nil
 }
 
@@ -62,6 +81,8 @@ func NewEngine(
 type DeployEngine struct {
 	client.Client
 	log logr.Logger
+
+	deployName types.NamespacedName
 
 	activeReplicasDesired *int32
 	backupReplicasDesired *int32
@@ -72,14 +93,26 @@ type DeployEngine struct {
 	Deploy *clusterv1alpha1.BlueGreenDeployment
 }
 
-// ActiveMatches returns true when active ReplicaSet matches desired Spec
-func (e *DeployEngine) ActiveMatches() bool {
+// ActiveMatchesSpec returns true when active ReplicaSet matches desired Spec
+func (e *DeployEngine) ActiveMatchesSpec() bool {
 	return podEquals(&e.Active.Spec.Template, &e.Deploy.Spec.Template)
 }
 
-// ActiveMatches returns true when backup ReplicaSet matches desired Spec
-func (e *DeployEngine) BackupMatches() bool {
+// ActiveMatchesSpec returns true when backup ReplicaSet matches desired Spec
+func (e *DeployEngine) BackupMatchesSpec() bool {
 	return podEquals(&e.Backup.Spec.Template, &e.Deploy.Spec.Template)
+}
+
+func (e *DeployEngine) OverrideColor() *string {
+	return e.Deploy.Spec.OverrideColor
+}
+
+func (e *DeployEngine) CurrentStatus() string {
+	return e.Deploy.Status.StatusName
+}
+
+func (e *DeployEngine) IsActive(color string) bool {
+	return e.Active.Labels[LabelColor] == color
 }
 
 func (e *DeployEngine) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired *int32) error {
@@ -87,29 +120,44 @@ func (e *DeployEngine) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired
 	if err := e.Client.Update(ctx, rs); err != nil {
 		return errors.Wrap(err, "unable to scale")
 	}
+
+	if err := e.awaitAllPods(ctx, rs); err != nil {
+		e.log.Error(err, "failed awaiting pod availability")
+	}
 	return nil
 }
 
 func (e *DeployEngine) Swap(ctx context.Context) error {
-	newColor := clusterv1alpha1.ColorBlue
-	if e.Svc.Spec.Selector[LabelColor] == newColor {
-		newColor = clusterv1alpha1.ColorGreen
+	if err := e.Scale(ctx, e.Backup, e.activeReplicasDesired); err != nil {
+		return errors.Wrap(err, "failed to scale")
 	}
-	e.Svc.Spec.Selector[LabelColor] = newColor
+	e.Svc.Spec.Selector[LabelColor] = e.Backup.Labels[LabelColor]
 
 	if err := e.Client.Update(ctx, e.Svc); err != nil {
 		return errors.Wrap(err, "unable to Swap")
 	}
 
-	e.Deploy.Status.ActiveColor = e.Active.Labels[LabelColor]
-	if err := e.Client.Status().Update(ctx, e.Deploy); err != nil {
-		return errors.Wrap(err, "unable to update deploy status")
-	}
-	if e.Active.Spec.Replicas != e.backupReplicasDesired {
-		if err := e.Scale(ctx, e.Active, e.backupReplicasDesired); err != nil {
-			return errors.Wrap(err, "unable to scale")
+	temp := e.Active
+	e.Active = e.Backup
+	e.Backup = temp
+
+	if e.Backup.Spec.Replicas != e.backupReplicasDesired {
+		if err := e.Scale(ctx, e.Backup, e.backupReplicasDesired); err != nil {
+			e.log.Error(err, "failed to scale backup")
 		}
 	}
+
+	if err := e.Get(ctx, e.deployName, e.Deploy); err != nil {
+		e.log.Error(err, "Failed to get latest deployment version")
+	}
+	e.Deploy.Status.ActiveColor = e.Active.Labels[LabelColor]
+	e.Deploy.Status.BackupReplicas = e.Backup.Status.Replicas
+	e.Deploy.Status.ActiveReplicas = e.Active.Status.Replicas
+
+	if err := e.Client.Status().Update(ctx, e.Deploy); err != nil {
+		e.log.Error(err, "Failed to update status")
+	}
+
 	return nil
 }
 
@@ -123,19 +171,44 @@ func (e *DeployEngine) UpgradeBackup(ctx context.Context) error {
 		return errors.Wrap(err, "failed to create new ReplicaSet")
 	}
 	e.Backup = newRs
+
+	//if e.Deploy.Status.BackupReplicas != e.Backup.Status.Replicas {
+	//	e.Deploy.Status.BackupReplicas = e.Backup.Status.Replicas
+	//	if err := e.Client.Status().Update(ctx, e.Deploy); err != nil {
+	//		e.log.Error(err, "failed to update status")
+	//	}
+	//}
+
 	return nil
 }
 
-func (e *DeployEngine) ensureDeployment(ctx context.Context, name types.NamespacedName) error {
+func (e *DeployEngine) SetStatus(ctx context.Context, status string) {
+	if err := e.Get(ctx, e.deployName, e.Deploy); err != nil {
+		e.log.Error(err, "Failed to get latest deployment version")
+	}
+
+	e.Deploy.Status.StatusName = status
+	if err := e.Client.Status().Update(ctx, e.Deploy); err != nil {
+		e.log.Error(err, "Failed to update status")
+	}
+}
+
+func (e *DeployEngine) getDeployment(ctx context.Context) error {
 	var deploy clusterv1alpha1.BlueGreenDeployment
-	if err := e.Client.Get(ctx, name, &deploy); err != nil {
+	if err := e.Client.Get(ctx, e.deployName, &deploy); err != nil {
 		return err
 	}
-	if deploy.Status.ActiveColor == "" {
-		e.log.Info("No color set for deployment, updating")
-		deploy.Status.ActiveColor = clusterv1alpha1.ColorBlue
+	if deploy.Status.ActiveColor == "" || deploy.Status.StatusName == "" {
+		if deploy.Status.ActiveColor == "" {
+			e.log.Info("No color set for deployment, updating")
+			deploy.Status.ActiveColor = clusterv1alpha1.ColorBlue
+		}
+		if deploy.Status.StatusName == "" {
+			e.log.Info("No status set for deployment, updating")
+			deploy.Status.StatusName = clusterv1alpha1.StatusUnknown
+		}
 		if err := e.Client.Status().Update(ctx, &deploy); err != nil {
-			return errors.Wrap(err, "failed to set color")
+			return errors.Wrap(err, "failed to set status")
 		}
 	}
 	e.Deploy = &deploy
@@ -173,7 +246,8 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 }
 
 func (e *DeployEngine) ensureReplicaSets(ctx context.Context) error {
-	for _, color := range clusterv1alpha1.Colors {
+	for color := range clusterv1alpha1.Colors {
+		// todo run in parallel
 		if rs, err := e.obtainReplicaSet(ctx, color); err != nil {
 			return err
 		} else {
@@ -260,7 +334,7 @@ func (e *DeployEngine) cleanup(ctx context.Context, name types.NamespacedName) {
 	} else if err := e.Client.Delete(ctx, &svc); err != nil {
 		e.log.Error(err, "Failed to delete service")
 	}
-	for _, color := range clusterv1alpha1.Colors {
+	for color := range clusterv1alpha1.Colors {
 		var rs appsv1.ReplicaSet
 		coloredName := fmt.Sprintf("%s-%s", name.Name, color)
 		namespacedName := client.ObjectKey{Namespace: name.Namespace, Name: coloredName}
@@ -274,14 +348,15 @@ func (e *DeployEngine) cleanup(ctx context.Context, name types.NamespacedName) {
 
 func (e *DeployEngine) awaitAllPods(ctx context.Context, replicaSet *appsv1.ReplicaSet) error {
 	namespacedName := client.ObjectKey{Namespace: replicaSet.Namespace, Name: replicaSet.Name}
+	expectedGeneration := replicaSet.Generation
+	expectedReplicas := *replicaSet.Spec.Replicas
 	return wait.PollImmediate(100*time.Millisecond, 30*time.Second, func() (bool, error) {
-		var rs appsv1.ReplicaSet
-		err := e.Client.Get(ctx, namespacedName, &rs)
+		err := e.Client.Get(ctx, namespacedName, replicaSet)
 		if err != nil {
 			return false, errors.Wrap(err, "failed to get ReplicaSet")
 		}
-		sameGeneration := rs.Status.ObservedGeneration >= replicaSet.Generation
-		samePodsNum := rs.Status.AvailableReplicas == *replicaSet.Spec.Replicas
+		sameGeneration := replicaSet.Status.ObservedGeneration >= expectedGeneration
+		samePodsNum := replicaSet.Status.AvailableReplicas == expectedReplicas
 		return sameGeneration && samePodsNum, nil
 	})
 }

@@ -33,13 +33,18 @@ type BlueGreenDeploymentSpec struct {
 	Service                v1.ServiceSpec     `json:"service"`
 	Replicas               *int32             `json:"replicas"`
 	BackupScaleDownPercent *int32             `json:"backupScaleDownPercent"`
+	// +optional
+	OverrideColor *string `json:"overrideColor,omitempty"`
 }
 
 type StatusName string
 
 const (
-	StatusNameActive = "Active"
-	// todo other
+	StatusUnknown      = "Unknown"
+	StatusNominal      = "Nominal"
+	StatusOverridden   = "Overridden"
+	StatusDeploying    = "Deploying"
+	StatusDeployFailed = "Failed"
 )
 
 const (
@@ -48,24 +53,30 @@ const (
 )
 
 var (
-	Colors = []string{ColorBlue, ColorGreen}
+	Colors = map[string]struct{}{
+		ColorBlue: {}, ColorGreen: {},
+	}
 )
 
 // BlueGreenDeploymentStatus defines the observed state of BlueGreenDeployment
 type BlueGreenDeploymentStatus struct {
 	// Important: Run "make" to regenerate code after modifying this file
-	StatusName  int32  `json:"status"`
-	Replicas    int32  `json:"replicas"`
-	ActiveColor string `json:"activeColor"`
+	ActiveReplicas int32  `json:"activeReplicas"`
+	BackupReplicas int32  `json:"backupReplicas"`
+	StatusName     string `json:"status"`
+	ActiveColor    string `json:"activeColor"`
 }
 
 // +kubebuilder:object:root=true
 
 // BlueGreenDeployment is the Schema for the bluegreendeployments API
-// +kubebuilder:resource:shortName=bgd
+// +kubebuilder:resource:shortName=kbg
 // +kubebuilder:subresource:status
 // +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
 // +kubebuilder:printcolumn:name="Color",type=string,JSONPath=`.status.activeColor`
+// +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
+// +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeReplicas`
+// +kubebuilder:printcolumn:name="Backup",type=string,JSONPath=`.status.backupReplicas`
 type BlueGreenDeployment struct {
 	metav1.TypeMeta   `json:",inline"`
 	metav1.ObjectMeta `json:"metadata,omitempty"`

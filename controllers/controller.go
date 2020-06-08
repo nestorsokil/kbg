@@ -18,6 +18,7 @@ package controllers
 
 import (
 	"context"
+	"fmt"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -57,27 +58,54 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 	}
 
 	switch {
-	case rn.ActiveMatches():
-		log.Info("No changes were detected, skipping")
+	case rn.OverrideColor() != nil:
+		override := *rn.OverrideColor()
+		if _, ok := clusterv1alpha1.Colors[override]; !ok {
+			err := fmt.Errorf("unknown color override value %s", override)
+			log.Error(err, err.Error())
+			return ctrl.Result{}, err
+		} else if rn.IsActive(override) {
+			log.Info("Active matches override color, skipping")
+		} else if err := rn.Swap(ctx); err != nil {
+			log.Error(err, "Failed to swap")
+			rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+			return ctrl.Result{}, err
+		}
+		if rn.CurrentStatus() != clusterv1alpha1.StatusOverridden {
+			rn.SetStatus(ctx, clusterv1alpha1.StatusOverridden)
+		}
 		return ctrl.Result{}, nil
-	case rn.BackupMatches():
+	case rn.ActiveMatchesSpec():
+		log.Info("No changes were detected, skipping")
+		if rn.CurrentStatus() != clusterv1alpha1.StatusNominal {
+			rn.SetStatus(ctx, clusterv1alpha1.StatusNominal)
+		}
+		return ctrl.Result{}, nil
+	case rn.BackupMatchesSpec():
 		log.Info("New config matches backup ReplicaSet, swapping")
 		if rn.Backup.Spec.Replicas != rn.Deploy.Spec.Replicas {
 			if err := rn.Scale(ctx, rn.Backup, rn.Deploy.Spec.Replicas); err != nil {
+				rn.SetStatus(ctx, clusterv1alpha1.StatusUnknown)
 				return ctrl.Result{}, errors.Wrap(err, "unable to scale")
 			}
 		}
-		return ctrl.Result{}, errors.Wrap(rn.Swap(ctx), "failed to swap service")
 	default:
 		log.Info("New configuration detected, running B/G deployment")
+		rn.SetStatus(ctx, clusterv1alpha1.StatusDeploying)
 		if err := rn.UpgradeBackup(ctx); err != nil {
+			rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
 			return ctrl.Result{}, errors.Wrap(err, "unable to upgrade ReplicaSet")
 		}
-
-		// TODO initiate smoke tests here
-
-		return ctrl.Result{}, errors.Wrap(rn.Swap(ctx), "failed to swap service")
 	}
+
+	// TODO initiate smoke tests here
+
+	if err := rn.Swap(ctx); err != nil {
+		rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+		return ctrl.Result{}, errors.Wrap(err, "failed to swap service")
+	}
+	rn.SetStatus(ctx, clusterv1alpha1.StatusNominal)
+	return ctrl.Result{}, nil
 }
 
 func (r *BlueGreenDeploymentReconciler) obtainDeployment(ctx context.Context, name types.NamespacedName) (*clusterv1alpha1.BlueGreenDeployment, error) {

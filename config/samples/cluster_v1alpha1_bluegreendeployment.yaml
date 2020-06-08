@@ -5,6 +5,7 @@ metadata:
 spec:
   replicas: 2
   backupScaleDownPercent: 50
+  #overrideColor: green
   service:
     type: NodePort
     ports:
