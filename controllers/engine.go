@@ -8,7 +8,6 @@ import (
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/equality"
 	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -36,9 +35,9 @@ func NewEngine(
 	req ctrl.Request,
 ) (*DeployEngine, error) {
 	engine := &DeployEngine{
-		Client:     client,
-		log:        log,
-		deployName: req.NamespacedName,
+		Client: client,
+		log:    log,
+		name:   req.NamespacedName,
 	}
 	if err := engine.getDeployment(ctx); err != nil {
 		if kuberrors.IsNotFound(err) {
@@ -76,7 +75,7 @@ type DeployEngine struct {
 	client.Client
 	log logr.Logger
 
-	deployName types.NamespacedName
+	name types.NamespacedName
 
 	activeReplicasDesired *int32
 	backupReplicasDesired *int32
@@ -183,7 +182,7 @@ func (e *DeployEngine) SetStatus(ctx context.Context, status string) {
 
 func (e *DeployEngine) getDeployment(ctx context.Context) error {
 	e.Deploy = &clusterv1alpha1.BlueGreenDeployment{}
-	if err := e.Client.Get(ctx, e.deployName, e.Deploy); err != nil {
+	if err := e.Client.Get(ctx, e.name, e.Deploy); err != nil {
 		return err
 	}
 	if e.Deploy.Status.ActiveColor == "" || e.Deploy.Status.StatusName == "" {
@@ -204,16 +203,35 @@ func (e *DeployEngine) getDeployment(ctx context.Context) error {
 }
 
 func (e *DeployEngine) ensureService(ctx context.Context) error {
-	var svc v1.Service
+	e.Svc = &v1.Service{}
 	key := client.ObjectKey{Namespace: e.Deploy.Namespace, Name: e.Deploy.Name}
-	if err := e.Get(ctx, key, &svc); err != nil {
-		if !kuberrors.IsNotFound(err) {
-			return errors.Wrap(err, "could not get Svc")
+	err := e.Get(ctx, key, e.Svc)
+	if err == nil {
+		if !svcEquals(&e.Svc.Spec, &e.Deploy.Spec.Service) {
+			e.log.Info("Detected Service change, updating")
+			svcCopy := e.Svc.DeepCopy()
+
+			if svcCopy.Spec.Type != e.Deploy.Spec.Service.Type {
+				// TODO handle type change?
+			}
+
+			if err := e.updateSvc(ctx, func(svc *v1.Service) {
+				svc.Spec = e.Deploy.Spec.Service
+				svc.Spec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
+				if svcCopy.Spec.ClusterIP != "" {
+					svc.Spec.ClusterIP = svcCopy.Spec.ClusterIP
+				}
+				// TODO preserve other immutable properties
+			}); err != nil {
+				return errors.Wrap(err, "failed to update service")
+			}
 		}
+		return nil
+	} else if kuberrors.IsNotFound(err) {
 		e.log.Info("Service was not found, creating")
 		svcSpec := e.Deploy.Spec.Service.DeepCopy()
 		svcSpec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
-		svc = v1.Service{
+		e.Svc = &v1.Service{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "Service",
 				APIVersion: "v1",
@@ -224,12 +242,13 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 			},
 			Spec: *svcSpec,
 		}
-		if err := e.Client.Create(ctx, &svc); err != nil {
+		if err := e.Client.Create(ctx, e.Svc); err != nil {
 			return err
 		}
-		e.log.Info(fmt.Sprintf("New service %s/%s was created", svc.Namespace, svc.Name))
+		e.log.Info(fmt.Sprintf("New service %s/%s was created", e.Svc.Namespace, e.Svc.Name))
+	} else {
+		return errors.Wrap(err, "could not get Svc")
 	}
-	e.Svc = &svc
 	return nil
 }
 
@@ -345,7 +364,7 @@ func (e *DeployEngine) cleanup(ctx context.Context, name types.NamespacedName) {
 
 func (e *DeployEngine) updateDeployStatus(ctx context.Context, mut func(*clusterv1alpha1.BlueGreenDeployment)) error {
 	return errors.Wrap(retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		if err := e.Get(ctx, e.deployName, e.Deploy); err != nil {
+		if err := e.Get(ctx, e.name, e.Deploy); err != nil {
 			return errors.Wrap(err, "failed to get deploy with retry")
 		}
 		mut(e.Deploy)
@@ -363,6 +382,16 @@ func (e *DeployEngine) updateReplicaSet(ctx context.Context, r *appsv1.ReplicaSe
 		}
 		mut(r)
 		return e.Update(ctx, r)
+	}), "failed to update with retry")
+}
+
+func (e *DeployEngine) updateSvc(ctx context.Context, mut func(*v1.Service)) error {
+	return errors.Wrap(retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if err := e.Get(ctx, e.name, e.Svc); err != nil {
+			return errors.Wrap(err, "failed to get deploy with retry")
+		}
+		mut(e.Svc)
+		return e.Update(ctx, e.Svc)
 	}), "failed to update with retry")
 }
 
@@ -386,53 +415,4 @@ func computeDesiredBackup(desiredActive, percent int32) int32 {
 	scaleDownPercent := percent
 	factor := float32(scaleDownPercent) / float32(100.0)
 	return int32(float32(desiredActive) * factor)
-}
-
-func podEquals(template1, template2 *v1.PodTemplateSpec) bool {
-	// TODO this still sucks
-
-	t1Copy := template1.DeepCopy()
-	t2Copy := template2.DeepCopy()
-	specs := []*v1.PodTemplateSpec{t1Copy, t2Copy}
-	for i := range specs {
-		delete(specs[i].Labels, "pod-template-hash")
-		delete(specs[i].Labels, LabelColor)
-		delete(specs[i].Labels, LabelName)
-
-		spec := &specs[i].Spec
-
-		if spec.RestartPolicy == "" {
-			spec.RestartPolicy = "Always"
-		}
-		if spec.DNSPolicy == "" {
-			spec.DNSPolicy = "ClusterFirst"
-		}
-		if spec.SchedulerName == "" {
-			spec.SchedulerName = "default-scheduler"
-		}
-		if spec.SecurityContext == nil {
-			spec.SecurityContext = &v1.PodSecurityContext{}
-		}
-		if spec.TerminationGracePeriodSeconds == nil {
-			var sec int64 = 30
-			spec.TerminationGracePeriodSeconds = &sec
-		}
-		for j := range spec.Containers {
-			container := &spec.Containers[j]
-			if container.TerminationMessagePath == "" {
-				container.TerminationMessagePath = "/dev/termination-log"
-			}
-			if container.TerminationMessagePolicy == "" {
-				container.TerminationMessagePolicy = "File"
-			}
-
-			for k := range container.Ports {
-				port := &container.Ports[k]
-				if port.Protocol == "" {
-					port.Protocol = "TCP"
-				}
-			}
-		}
-	}
-	return equality.Semantic.DeepEqual(t1Copy, t2Copy)
 }
