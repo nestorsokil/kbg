@@ -66,10 +66,14 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 			return ctrl.Result{}, err
 		} else if rn.IsActive(override) {
 			log.Info("Active matches override color, skipping")
-		} else if err := rn.Swap(ctx); err != nil {
-			log.Error(err, "Failed to swap")
-			rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
-			return ctrl.Result{}, err
+			return ctrl.Result{}, nil
+		} else {
+			log.Info("Backup matches override color, swapping")
+			if err := rn.Swap(ctx); err != nil {
+				log.Error(err, "Failed to swap")
+				rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+				return ctrl.Result{}, err
+			}
 		}
 		if rn.CurrentStatus() != clusterv1alpha1.StatusOverridden {
 			rn.SetStatus(ctx, clusterv1alpha1.StatusOverridden)
