@@ -29,11 +29,6 @@ import (
 	clusterv1alpha1 "github.com/nestorsokil/kbg/api/v1alpha1"
 )
 
-const (
-	LabelColor = "kbg/color"
-	LabelName  = "name" // todo k8s.io?
-)
-
 // BlueGreenDeploymentReconciler reconciles a BlueGreenDeployment object
 type BlueGreenDeploymentReconciler struct {
 	client.Client
@@ -94,7 +89,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 			}
 		}
 	default:
-		log.Info("New configuration detected, running B/G deployment")
+		log.Info("New configuration detected, running deployment")
 		rn.SetStatus(ctx, clusterv1alpha1.StatusDeploying)
 		if err := rn.UpgradeBackup(ctx); err != nil {
 			rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)

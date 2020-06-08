@@ -8,6 +8,7 @@ import (
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
@@ -21,6 +22,11 @@ import (
 
 var (
 	ErrDeleted = errors.New("deployment was deleted")
+)
+
+const (
+	LabelColor = "kbg/color"
+	LabelName  = "kbg/name"
 )
 
 func NewEngine(
@@ -48,6 +54,7 @@ func NewEngine(
 	backupReplicas := computeDesiredBackup(*engine.activeReplicasDesired, *engine.Deploy.Spec.BackupScaleDownPercent)
 	engine.backupReplicasDesired = &backupReplicas
 
+	// TODO apply changes to service OR use an external one
 	if err := engine.ensureService(ctx); err != nil {
 		return nil, err
 	}
@@ -381,18 +388,51 @@ func computeDesiredBackup(desiredActive, percent int32) int32 {
 	return int32(float32(desiredActive) * factor)
 }
 
-// from github.com/kubernetes/kubernetes/staging/src/k8s.io/kubectl/pkg/util/deployment/deployment.go
 func podEquals(template1, template2 *v1.PodTemplateSpec) bool {
-	return template1.Spec.Containers[0].Image == template2.Spec.Containers[0].Image
-	// todo these are hacks, will figure out later
+	// TODO this still sucks
 
-	//for i := range template1.Spec.Containers {
-	//	template1.Spec.Containers[i].TerminationMessagePath = "/dev/termination-log"
-	//	template1.Spec.Containers[i].TerminationMessagePolicy = "File"
-	//}
-	//for i := range template2.Spec.Containers {
-	//	template2.Spec.Containers[i].TerminationMessagePath = "/dev/termination-log"
-	//	template2.Spec.Containers[i].TerminationMessagePolicy = "File"
-	//}
-	//return apiequality.Semantic.DeepEqual(template1.Spec.Containers, template2.Spec.Containers)
+	t1Copy := template1.DeepCopy()
+	t2Copy := template2.DeepCopy()
+	specs := []*v1.PodTemplateSpec{t1Copy, t2Copy}
+	for i := range specs {
+		delete(specs[i].Labels, "pod-template-hash")
+		delete(specs[i].Labels, LabelColor)
+		delete(specs[i].Labels, LabelName)
+
+		spec := &specs[i].Spec
+
+		if spec.RestartPolicy == "" {
+			spec.RestartPolicy = "Always"
+		}
+		if spec.DNSPolicy == "" {
+			spec.DNSPolicy = "ClusterFirst"
+		}
+		if spec.SchedulerName == "" {
+			spec.SchedulerName = "default-scheduler"
+		}
+		if spec.SecurityContext == nil {
+			spec.SecurityContext = &v1.PodSecurityContext{}
+		}
+		if spec.TerminationGracePeriodSeconds == nil {
+			var sec int64 = 30
+			spec.TerminationGracePeriodSeconds = &sec
+		}
+		for j := range spec.Containers {
+			container := &spec.Containers[j]
+			if container.TerminationMessagePath == "" {
+				container.TerminationMessagePath = "/dev/termination-log"
+			}
+			if container.TerminationMessagePolicy == "" {
+				container.TerminationMessagePolicy = "File"
+			}
+
+			for k := range container.Ports {
+				port := &container.Ports[k]
+				if port.Protocol == "" {
+					port.Protocol = "TCP"
+				}
+			}
+		}
+	}
+	return equality.Semantic.DeepEqual(t1Copy, t2Copy)
 }
