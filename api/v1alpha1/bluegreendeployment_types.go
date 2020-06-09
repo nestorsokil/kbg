@@ -65,6 +65,7 @@ type BlueGreenDeploymentStatus struct {
 	BackupReplicas int32  `json:"backupReplicas"`
 	StatusName     string `json:"status"`
 	ActiveColor    string `json:"activeColor"`
+	Selector       string `json:"selector"`
 }
 
 // +kubebuilder:object:root=true
@@ -72,7 +73,7 @@ type BlueGreenDeploymentStatus struct {
 // BlueGreenDeployment is the Schema for the bluegreendeployments API
 // +kubebuilder:resource:shortName=kbg
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.activeReplicas,selectorpath=.status.selector
 // +kubebuilder:printcolumn:name="Color",type=string,JSONPath=`.status.activeColor`
 // +kubebuilder:printcolumn:name="Status",type=string,JSONPath=`.status.status`
 // +kubebuilder:printcolumn:name="Active",type=string,JSONPath=`.status.activeReplicas`

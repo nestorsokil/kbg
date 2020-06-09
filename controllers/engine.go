@@ -26,6 +26,7 @@ var (
 const (
 	LabelColor = "kbg/color"
 	LabelName  = "kbg/name"
+	LabelApp   = "kbg/app"
 )
 
 func NewEngine(
@@ -143,6 +144,13 @@ func (e *DeployEngine) Swap(ctx context.Context) error {
 		d.Status.ActiveColor = e.Active.Labels[LabelColor]
 		d.Status.BackupReplicas = e.Backup.Status.Replicas
 		d.Status.ActiveReplicas = e.Active.Status.Replicas
+		serviceLabels := e.Svc.Spec.Selector
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: serviceLabels})
+		if err != nil {
+			e.log.Error(err, "Failed to get active selector")
+			return
+		}
+		d.Status.Selector = selector.String()
 	}); err != nil {
 		e.log.Error(err, "Failed to update status")
 	}
@@ -217,7 +225,9 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 
 			if err := e.updateSvc(ctx, func(svc *v1.Service) {
 				svc.Spec = e.Deploy.Spec.Service
-				svc.Spec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
+				svc.Spec.Selector = map[string]string{
+					LabelColor: clusterv1alpha1.ColorBlue,
+				}
 				if svcCopy.Spec.ClusterIP != "" {
 					svc.Spec.ClusterIP = svcCopy.Spec.ClusterIP
 				}
@@ -230,7 +240,10 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 	} else if kuberrors.IsNotFound(err) {
 		e.log.Info("Service was not found, creating")
 		svcSpec := e.Deploy.Spec.Service.DeepCopy()
-		svcSpec.Selector = map[string]string{LabelColor: clusterv1alpha1.ColorBlue}
+		svcSpec.Selector = map[string]string{
+			LabelApp:   e.name.Name,
+			LabelColor: clusterv1alpha1.ColorBlue,
+		}
 		e.Svc = &v1.Service{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "Service",
@@ -246,6 +259,18 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 			return err
 		}
 		e.log.Info(fmt.Sprintf("New service %s/%s was created", e.Svc.Namespace, e.Svc.Name))
+
+		if err := e.updateDeployStatus(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
+			serviceLabels := e.Svc.Spec.Selector
+			selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: serviceLabels})
+			if err != nil {
+				e.log.Error(err, "Failed to get active selector")
+				return
+			}
+			e.Deploy.Status.Selector = selector.String()
+		}); err != nil {
+			e.log.Error(err, "Failed to set deployment scale selector")
+		}
 	} else {
 		return errors.Wrap(err, "could not get Svc")
 	}
@@ -305,6 +330,7 @@ func (e *DeployEngine) obtainReplicaSet(ctx context.Context, color string) (*app
 func (e *DeployEngine) createReplicaSet(ctx context.Context, replicas *int32, color string) (*appsv1.ReplicaSet, error) {
 	coloredName := fmt.Sprintf("%s-%s", e.Deploy.Name, color)
 	labels := map[string]string{
+		LabelApp:   e.name.Name,
 		LabelName:  coloredName,
 		LabelColor: color,
 	}

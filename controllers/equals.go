@@ -15,6 +15,7 @@ func podEquals(template1, template2 *v1.PodTemplateSpec) bool {
 		delete(specs[i].Labels, "pod-template-hash")
 		delete(specs[i].Labels, LabelColor)
 		delete(specs[i].Labels, LabelName)
+		delete(specs[i].Labels, LabelApp)
 
 		spec := &specs[i].Spec
 
