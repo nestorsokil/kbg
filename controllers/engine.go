@@ -54,8 +54,7 @@ func NewEngine(
 	backupReplicas := computeDesiredBackup(*engine.activeReplicasDesired, *engine.Deploy.Spec.BackupScaleDownPercent)
 	engine.backupReplicasDesired = &backupReplicas
 
-	// TODO apply changes to service OR use an external one
-	if err := engine.ensureService(ctx); err != nil {
+	if err := engine.ensureServices(ctx); err != nil {
 		return nil, err
 	}
 	if err := engine.ensureReplicaSets(ctx); err != nil {
@@ -81,7 +80,9 @@ type DeployEngine struct {
 	activeReplicasDesired *int32
 	backupReplicasDesired *int32
 
-	Svc    *v1.Service
+	ActiveSvc *v1.Service
+	BackupSvc *v1.Service
+
 	Active *appsv1.ReplicaSet
 	Backup *appsv1.ReplicaSet
 	Deploy *clusterv1alpha1.BlueGreenDeployment
@@ -125,8 +126,15 @@ func (e *DeployEngine) Swap(ctx context.Context) error {
 	if err := e.Scale(ctx, e.Backup, e.activeReplicasDesired); err != nil {
 		return errors.Wrap(err, "failed to scale")
 	}
-	e.Svc.Spec.Selector[LabelColor] = e.Backup.Labels[LabelColor]
-	if err := e.Client.Update(ctx, e.Svc); err != nil {
+
+	// TODO retry
+	e.ActiveSvc.Spec.Selector[LabelColor] = e.Backup.Labels[LabelColor]
+	if err := e.Client.Update(ctx, e.ActiveSvc); err != nil {
+		return errors.Wrap(err, "unable to Swap")
+	}
+
+	e.BackupSvc.Spec.Selector[LabelColor] = e.Active.Labels[LabelColor]
+	if err := e.Client.Update(ctx, e.BackupSvc); err != nil {
 		return errors.Wrap(err, "unable to Swap")
 	}
 
@@ -144,7 +152,7 @@ func (e *DeployEngine) Swap(ctx context.Context) error {
 		d.Status.ActiveColor = e.Active.Labels[LabelColor]
 		d.Status.BackupReplicas = e.Backup.Status.Replicas
 		d.Status.ActiveReplicas = e.Active.Status.Replicas
-		serviceLabels := e.Svc.Spec.Selector
+		serviceLabels := e.ActiveSvc.Spec.Selector
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: serviceLabels})
 		if err != nil {
 			e.log.Error(err, "Failed to get active selector")
@@ -210,24 +218,50 @@ func (e *DeployEngine) getDeployment(ctx context.Context) error {
 	return nil
 }
 
-func (e *DeployEngine) ensureService(ctx context.Context) error {
-	e.Svc = &v1.Service{}
-	key := client.ObjectKey{Namespace: e.Deploy.Namespace, Name: e.Deploy.Name}
-	err := e.Get(ctx, key, e.Svc)
-	if err == nil {
-		if !svcEquals(&e.Svc.Spec, &e.Deploy.Spec.Service) {
-			e.log.Info("Detected Service change, updating")
-			svcCopy := e.Svc.DeepCopy()
+func (e *DeployEngine) ensureServices(ctx context.Context) error {
+	e.ActiveSvc = &v1.Service{}
+	activeName := e.Deploy.Name
+	activeColor := e.Deploy.Status.ActiveColor
+	if err := e.ensureService(ctx, e.ActiveSvc, activeName, activeColor); err != nil {
+		return errors.Wrap(err, "failed to ensure active service")
+	}
 
+	e.BackupSvc = &v1.Service{}
+	backupName := fmt.Sprintf("%s-backup", e.Deploy.Name)
+	backupColor := clusterv1alpha1.OppositeColors[e.Deploy.Status.ActiveColor]
+	if err := e.ensureService(ctx, e.BackupSvc, backupName, backupColor); err != nil {
+		return errors.Wrap(err, "failed to ensure active service")
+	}
+
+	if err := e.updateDeployStatus(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
+		serviceLabels := e.ActiveSvc.Spec.Selector
+		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: serviceLabels})
+		if err != nil {
+			e.log.Error(err, "Failed to get active selector")
+			return
+		}
+		e.Deploy.Status.Selector = selector.String()
+	}); err != nil {
+		e.log.Error(err, "Failed to set deployment scale selector")
+	}
+
+	return nil
+}
+
+func (e *DeployEngine) ensureService(ctx context.Context, target *v1.Service, expectedName, expectedColor string) error {
+	key := client.ObjectKey{Namespace: e.Deploy.Namespace, Name: expectedName}
+	err := e.Get(ctx, key, target)
+	if err == nil {
+		if !svcEquals(&target.Spec, &e.Deploy.Spec.Service) {
+			e.log.Info("Detected Service change, updating")
+			svcCopy := e.ActiveSvc.DeepCopy()
 			if svcCopy.Spec.Type != e.Deploy.Spec.Service.Type {
 				// TODO handle type change?
 			}
 
 			if err := e.updateSvc(ctx, func(svc *v1.Service) {
 				svc.Spec = e.Deploy.Spec.Service
-				svc.Spec.Selector = map[string]string{
-					LabelColor: clusterv1alpha1.ColorBlue,
-				}
+				svc.Spec.Selector = target.Spec.Selector
 				if svcCopy.Spec.ClusterIP != "" {
 					svc.Spec.ClusterIP = svcCopy.Spec.ClusterIP
 				}
@@ -238,39 +272,28 @@ func (e *DeployEngine) ensureService(ctx context.Context) error {
 		}
 		return nil
 	} else if kuberrors.IsNotFound(err) {
-		e.log.Info("Service was not found, creating")
+		e.log.Info(fmt.Sprintf("Service %s/%s was not found, creating", e.Deploy.Namespace, expectedName))
 		svcSpec := e.Deploy.Spec.Service.DeepCopy()
+		// TODO maybe selector should be static and just reapply labels on ReplicaSets?
 		svcSpec.Selector = map[string]string{
-			LabelApp:   e.name.Name,
-			LabelColor: clusterv1alpha1.ColorBlue,
+			LabelApp:   e.Deploy.Name,
+			LabelColor: expectedColor,
 		}
-		e.Svc = &v1.Service{
+		target = &v1.Service{
 			TypeMeta: metav1.TypeMeta{
 				Kind:       "Service",
 				APIVersion: "v1",
 			},
 			ObjectMeta: metav1.ObjectMeta{
-				Name:      e.Deploy.Name,
+				Name:      expectedName,
 				Namespace: e.Deploy.Namespace,
 			},
 			Spec: *svcSpec,
 		}
-		if err := e.Client.Create(ctx, e.Svc); err != nil {
+		if err := e.Client.Create(ctx, target); err != nil {
 			return err
 		}
-		e.log.Info(fmt.Sprintf("New service %s/%s was created", e.Svc.Namespace, e.Svc.Name))
-
-		if err := e.updateDeployStatus(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
-			serviceLabels := e.Svc.Spec.Selector
-			selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{MatchLabels: serviceLabels})
-			if err != nil {
-				e.log.Error(err, "Failed to get active selector")
-				return
-			}
-			e.Deploy.Status.Selector = selector.String()
-		}); err != nil {
-			e.log.Error(err, "Failed to set deployment scale selector")
-		}
+		e.log.Info(fmt.Sprintf("New service %s/%s was created", target.Namespace, target.Name))
 	} else {
 		return errors.Wrap(err, "could not get Svc")
 	}
@@ -376,6 +399,13 @@ func (e *DeployEngine) cleanup(ctx context.Context, name types.NamespacedName) {
 	} else if err := e.Client.Delete(ctx, &svc); err != nil {
 		e.log.Error(err, "Failed to delete service")
 	}
+	backupName := fmt.Sprintf("%s-backup", name.Name)
+	bakServiceKey := client.ObjectKey{Namespace: name.Namespace, Name: backupName}
+	if err := e.Client.Get(ctx, bakServiceKey, &svc); err != nil {
+		e.log.Error(err, "Failed to lookup service")
+	} else if err := e.Client.Delete(ctx, &svc); err != nil {
+		e.log.Error(err, "Failed to delete service")
+	}
 	for color := range clusterv1alpha1.Colors {
 		var rs appsv1.ReplicaSet
 		coloredName := fmt.Sprintf("%s-%s", name.Name, color)
@@ -413,11 +443,11 @@ func (e *DeployEngine) updateReplicaSet(ctx context.Context, r *appsv1.ReplicaSe
 
 func (e *DeployEngine) updateSvc(ctx context.Context, mut func(*v1.Service)) error {
 	return errors.Wrap(retry.RetryOnConflict(retry.DefaultBackoff, func() error {
-		if err := e.Get(ctx, e.name, e.Svc); err != nil {
+		if err := e.Get(ctx, e.name, e.ActiveSvc); err != nil {
 			return errors.Wrap(err, "failed to get deploy with retry")
 		}
-		mut(e.Svc)
-		return e.Update(ctx, e.Svc)
+		mut(e.ActiveSvc)
+		return e.Update(ctx, e.ActiveSvc)
 	}), "failed to update with retry")
 }
 

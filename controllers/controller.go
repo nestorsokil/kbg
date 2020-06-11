@@ -43,7 +43,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 	log := r.Log.WithValues(
 		"bluegreendeployment", req.NamespacedName)
 
-	rn, err := NewEngine(ctx, log, r.Client, req)
+	eng, err := NewEngine(ctx, log, r.Client, req)
 	if err != nil {
 		if err == ErrDeleted {
 			return ctrl.Result{}, nil
@@ -53,57 +53,57 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 	}
 
 	switch {
-	case rn.OverrideColor() != nil:
-		override := *rn.OverrideColor()
+	case eng.OverrideColor() != nil:
+		override := *eng.OverrideColor()
 		if _, ok := clusterv1alpha1.Colors[override]; !ok {
 			err := fmt.Errorf("unknown color override value %s", override)
 			log.Error(err, err.Error())
 			return ctrl.Result{}, err
-		} else if rn.IsActive(override) {
+		} else if eng.IsActive(override) {
 			log.Info("Active matches override color, skipping")
 			return ctrl.Result{}, nil
 		} else {
 			log.Info("Backup matches override color, swapping")
-			if err := rn.Swap(ctx); err != nil {
+			if err := eng.Swap(ctx); err != nil {
 				log.Error(err, "Failed to swap")
-				rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+				eng.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
 				return ctrl.Result{}, err
 			}
 		}
-		if rn.CurrentStatus() != clusterv1alpha1.StatusOverridden {
-			rn.SetStatus(ctx, clusterv1alpha1.StatusOverridden)
+		if eng.CurrentStatus() != clusterv1alpha1.StatusOverridden {
+			eng.SetStatus(ctx, clusterv1alpha1.StatusOverridden)
 		}
 		return ctrl.Result{}, nil
-	case rn.ActiveMatchesSpec():
+	case eng.ActiveMatchesSpec():
 		log.Info("No changes were detected, skipping")
-		if rn.CurrentStatus() != clusterv1alpha1.StatusNominal {
-			rn.SetStatus(ctx, clusterv1alpha1.StatusNominal)
+		if eng.CurrentStatus() != clusterv1alpha1.StatusNominal {
+			eng.SetStatus(ctx, clusterv1alpha1.StatusNominal)
 		}
 		return ctrl.Result{}, nil
-	case rn.BackupMatchesSpec():
+	case eng.BackupMatchesSpec():
 		log.Info("New config matches backup ReplicaSet, swapping")
-		if rn.Backup.Spec.Replicas != rn.Deploy.Spec.Replicas {
-			if err := rn.Scale(ctx, rn.Backup, rn.Deploy.Spec.Replicas); err != nil {
-				rn.SetStatus(ctx, clusterv1alpha1.StatusUnknown)
+		if eng.Backup.Spec.Replicas != eng.Deploy.Spec.Replicas {
+			if err := eng.Scale(ctx, eng.Backup, eng.Deploy.Spec.Replicas); err != nil {
+				eng.SetStatus(ctx, clusterv1alpha1.StatusUnknown)
 				return ctrl.Result{}, errors.Wrap(err, "unable to scale")
 			}
 		}
 	default:
 		log.Info("New configuration detected, running deployment")
-		rn.SetStatus(ctx, clusterv1alpha1.StatusDeploying)
-		if err := rn.UpgradeBackup(ctx); err != nil {
-			rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+		eng.SetStatus(ctx, clusterv1alpha1.StatusDeploying)
+		if err := eng.UpgradeBackup(ctx); err != nil {
+			eng.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
 			return ctrl.Result{}, errors.Wrap(err, "unable to upgrade ReplicaSet")
 		}
 	}
 
 	// TODO initiate smoke tests here
 
-	if err := rn.Swap(ctx); err != nil {
-		rn.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+	if err := eng.Swap(ctx); err != nil {
+		eng.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
 		return ctrl.Result{}, errors.Wrap(err, "failed to swap service")
 	}
-	rn.SetStatus(ctx, clusterv1alpha1.StatusNominal)
+	eng.SetStatus(ctx, clusterv1alpha1.StatusNominal)
 	return ctrl.Result{}, nil
 }
 

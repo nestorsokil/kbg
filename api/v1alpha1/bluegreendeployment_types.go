@@ -56,6 +56,9 @@ var (
 	Colors = map[string]struct{}{
 		ColorBlue: {}, ColorGreen: {},
 	}
+	OppositeColors = map[string]string{
+		ColorBlue: ColorGreen, ColorGreen: ColorBlue,
+	}
 )
 
 // BlueGreenDeploymentStatus defines the observed state of BlueGreenDeployment
