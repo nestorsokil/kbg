@@ -99,3 +99,9 @@ No resources found in test namespace.
 - Sync mode (hook into admission?) to fail the update if tests fail
 - RBAC, tested in "privileged" mode
 - Unit/Integration testing, then refactoring
+
+## References
+
+- A big part of this is based on [Google's sample Blue/Green Controller](https://github.com/google/blue-green-deployment-controller/blob/kubebuilder/pkg/controller/bluegreendeployment/controller.go)
+- [Kubebuilder book](https://book.kubebuilder.io/)
+- [Kubebuilder book v1](https://book-v1.book.kubebuilder.io)
