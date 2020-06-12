@@ -1,0 +1,9 @@
+version: '3.2'
+services:
+  kbg:
+    container_name: kbg-operator
+    build:
+      context: .
+      dockerfile: Dockerfile
+    volumes:
+      - ~/.kube/config:/home/nonroot/.kube/config:ro

@@ -10,12 +10,13 @@ kbg (Kube Blue-Green) - _Pronounced "Cabbage"_
 make install
 ```
 
-### Local/Debug
+### Docker Local
+
 ```bash
-~/ go run main.go
+docker-compose up kbg
 ```
 
-### Docker
+### Install in Kubernetes
 TODO
 
 ## Workflow
@@ -94,8 +95,10 @@ bluegreendeployment.cluster.kbg "myserver" deleted
 No resources found in test namespace.
 ```
 
-## Missing/Untested Features
+## TODOs/Missing Features
 
 - HPA support (untested)
 - Default/Validating webhooks (untested)
 - Sync mode (hook into admission?) to fail the update if tests fail
+- RBAC, tested in "privileged" mode
+- Unit/Integration testing, then refactoring
