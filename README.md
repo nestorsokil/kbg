@@ -102,6 +102,6 @@ No resources found in test namespace.
 
 ## References
 
-- A big part of this is based on [Google's sample Blue/Green Controller](https://github.com/google/blue-green-deployment-controller/blob/kubebuilder/pkg/controller/bluegreendeployment/controller.go)
-- [Kubebuilder book](https://book.kubebuilder.io/)
+- A big part of this is based on [Google's sample Blue/Green Controller](https://github.com/google/blue-green-deployment-controller)
+- [Kubebuilder book](https://book.kubebuilder.io)
 - [Kubebuilder book v1](https://book-v1.book.kubebuilder.io)
