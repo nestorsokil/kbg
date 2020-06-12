@@ -5,18 +5,15 @@ kbg (Kube Blue-Green) - _Pronounced "Cabbage"_
 <img src="https://github.com/nestorsokil/kbg/raw/master/resources/mascot.png" width="200">
 
 ## Installation
-
-```bash
-make install
-```
-
 ### Docker Local
 
 ```bash
+# assuming local kube is running and kubectx is pointing to it
+make install
 docker-compose up kbg
 ```
 
-### Install in Kubernetes
+### Install in Production cluster
 TODO
 
 ## Workflow
