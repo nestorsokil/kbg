@@ -88,6 +88,7 @@ func (in *BlueGreenDeploymentSpec) DeepCopyInto(out *BlueGreenDeploymentSpec) {
 	*out = *in
 	in.Template.DeepCopyInto(&out.Template)
 	in.Service.DeepCopyInto(&out.Service)
+	in.TestSpec.DeepCopyInto(&out.TestSpec)
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
 		*out = new(int32)
@@ -96,6 +97,11 @@ func (in *BlueGreenDeploymentSpec) DeepCopyInto(out *BlueGreenDeploymentSpec) {
 	if in.BackupScaleDownPercent != nil {
 		in, out := &in.BackupScaleDownPercent, &out.BackupScaleDownPercent
 		*out = new(int32)
+		**out = **in
+	}
+	if in.OverrideColor != nil {
+		in, out := &in.OverrideColor, &out.OverrideColor
+		*out = new(string)
 		**out = **in
 	}
 }

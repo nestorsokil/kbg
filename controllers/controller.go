@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"github.com/go-logr/logr"
 	"github.com/pkg/errors"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -53,6 +54,14 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 	}
 
 	switch {
+	case eng.Deploy.Status.StatusName == clusterv1alpha1.StatusDeployFailed:
+		if err := eng.updateDeploy(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
+			d.Spec.Template = eng.Active.Spec.Template
+		}); err != nil {
+			return ctrl.Result{}, errors.Wrap(err, "failed to restore deployment")
+		}
+		eng.SetStatus(ctx, clusterv1alpha1.StatusNominal)
+		return ctrl.Result{}, nil
 	case eng.OverrideColor() != nil:
 		override := *eng.OverrideColor()
 		if _, ok := clusterv1alpha1.Colors[override]; !ok {
@@ -80,24 +89,30 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 			eng.SetStatus(ctx, clusterv1alpha1.StatusNominal)
 		}
 		return ctrl.Result{}, nil
-	case eng.BackupMatchesSpec():
+	}
+	eng.SetStatus(ctx, clusterv1alpha1.StatusDeploying)
+	var prev *v1.PodTemplateSpec
+	if eng.BackupMatchesSpec() {
 		log.Info("New config matches backup ReplicaSet, swapping")
-		if eng.Backup.Spec.Replicas != eng.Deploy.Spec.Replicas {
-			if err := eng.Scale(ctx, eng.Backup, eng.Deploy.Spec.Replicas); err != nil {
-				eng.SetStatus(ctx, clusterv1alpha1.StatusUnknown)
-				return ctrl.Result{}, errors.Wrap(err, "unable to scale")
-			}
-		}
-	default:
+	} else {
 		log.Info("New configuration detected, running deployment")
-		eng.SetStatus(ctx, clusterv1alpha1.StatusDeploying)
-		if err := eng.UpgradeBackup(ctx); err != nil {
+		if prev, err = eng.UpgradeBackup(ctx); err != nil {
 			eng.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
 			return ctrl.Result{}, errors.Wrap(err, "unable to upgrade ReplicaSet")
 		}
 	}
-
-	// TODO initiate smoke tests here
+	log.Info("Initiating backup tests")
+	if err := eng.RunTestsOnBackup(ctx); err != nil {
+		log.Error(err, "Failed to test, rolling back")
+		// TODO ping slack?
+		if prev != nil {
+			if _, err := eng.DemoteBackup(ctx, prev); err != nil {
+				log.Error(err, "Failed to demote backup to previous state")
+			}
+		}
+		eng.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)
+		return ctrl.Result{}, nil
+	}
 
 	if err := eng.Swap(ctx); err != nil {
 		eng.SetStatus(ctx, clusterv1alpha1.StatusDeployFailed)

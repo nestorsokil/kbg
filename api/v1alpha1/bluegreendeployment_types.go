@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	v12 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -29,10 +30,12 @@ type BlueGreenDeploymentSpec struct {
 	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
 
-	Template               v1.PodTemplateSpec `json:"template"`
-	Service                v1.ServiceSpec     `json:"service"`
-	Replicas               *int32             `json:"replicas"`
-	BackupScaleDownPercent *int32             `json:"backupScaleDownPercent"`
+	Template v1.PodTemplateSpec `json:"template"`
+	Service  v1.ServiceSpec     `json:"service"`
+	TestSpec v12.JobSpec        `json:"testSpec,omitempty"`
+
+	Replicas               *int32 `json:"replicas"`
+	BackupScaleDownPercent *int32 `json:"backupScaleDownPercent"`
 	// +optional
 	OverrideColor *string `json:"overrideColor,omitempty"`
 }

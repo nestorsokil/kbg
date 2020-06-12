@@ -13,6 +13,25 @@ spec:
         port: 80
         targetPort: 80
         protocol: TCP
+  testSpec:
+    ttlSecondsAfterFinished: 100
+    backoffLimit: 0
+    template:
+      spec:
+        containers:
+          - name: smoke
+            image: curlimages/curl:7.69.0
+            command: ["/bin/sh", "-c"]
+            # assert the version header
+            args:
+              - |
+                set -ex
+                set -o pipefail
+                server=$(curl -s -D - myserver-backup -o /dev/null | grep "Server: nginx/1.18.0")
+                if [[ -z "$server" ]]; then
+                  exit 1
+                fi
+        restartPolicy: Never
   template:
     spec:
       containers:

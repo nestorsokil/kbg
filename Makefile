@@ -27,7 +27,14 @@ run: generate fmt vet manifests
 
 # Install CRDs into a cluster
 install: manifests
-	kustomize build config/crd | kubectl apply -f -
+	echo "not working at the moment; use install-create/install-replace"
+	#kustomize build config/crd | kubectl apply -f -
+
+# TODO k apply -f stopped working https://github.com/kubernetes-sigs/kubebuilder/issues/1140
+install-create: manifests
+	kustomize build config/crd | kubectl create -f -
+install-replace: manifests
+	kustomize build config/crd | kubectl replace -f -
 
 # Uninstall CRDs from a cluster
 uninstall: manifests

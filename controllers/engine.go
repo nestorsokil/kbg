@@ -7,6 +7,7 @@ import (
 	clusterv1alpha1 "github.com/nestorsokil/kbg/api/v1alpha1"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
+	v12 "k8s.io/api/batch/v1"
 	v1 "k8s.io/api/core/v1"
 	kuberrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -69,6 +70,8 @@ func NewEngine(
 
 	return engine, nil
 }
+
+// TODO make sure that all public methods are atomic
 
 // DeployEngine is a stateful B/G deployment helper
 type DeployEngine struct {
@@ -166,17 +169,27 @@ func (e *DeployEngine) Swap(ctx context.Context) error {
 	return nil
 }
 
-func (e *DeployEngine) UpgradeBackup(ctx context.Context) error {
+func (e *DeployEngine) UpgradeBackup(ctx context.Context) (prevSpec *v1.PodTemplateSpec, err error) {
+	return e.applyTemplateOnBackup(ctx, &e.Deploy.Spec.Template)
+}
+
+func (e *DeployEngine) DemoteBackup(ctx context.Context, desiredState *v1.PodTemplateSpec) (prevSpec *v1.PodTemplateSpec, err error) {
+	return e.applyTemplateOnBackup(ctx, desiredState)
+}
+
+func (e *DeployEngine) applyTemplateOnBackup(ctx context.Context, template *v1.PodTemplateSpec) (prevSpec *v1.PodTemplateSpec, err error) {
 	color := e.Backup.Labels[LabelColor]
+	prevSpec = &e.Backup.Spec.Template
 	if err := e.Client.Delete(ctx, e.Backup); err != nil {
-		return errors.Wrap(err, "failed to destroy stale ReplicaSet")
+		return prevSpec, errors.Wrap(err, "failed to destroy stale ReplicaSet")
 	}
-	newRs, err := e.createReplicaSet(ctx, e.Deploy.Spec.Replicas, color)
+	e.Backup.Spec.Template = *template
+
+	newRs, err := e.createReplicaSet(ctx, e.backupReplicasDesired, color)
 	if err != nil {
-		return errors.Wrap(err, "failed to create new ReplicaSet")
+		return prevSpec, errors.Wrap(err, "failed to create new ReplicaSet")
 	}
 	e.Backup = newRs
-
 	if e.Deploy.Status.BackupReplicas != e.Backup.Status.Replicas {
 		if err := e.updateDeployStatus(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
 			d.Status.BackupReplicas = e.Backup.Status.Replicas
@@ -184,8 +197,60 @@ func (e *DeployEngine) UpgradeBackup(ctx context.Context) error {
 			e.log.Error(err, "failed to update status")
 		}
 	}
+	return prevSpec, nil
+}
 
+func (e *DeployEngine) RunTestsOnBackup(ctx context.Context) error {
+	// probably a shitty check, whatever
+	if len(e.Deploy.Spec.TestSpec.Template.Spec.Containers) == 0 {
+		e.log.Info("No tests specified, skipping")
+		return nil
+	}
+	jobName := fmt.Sprintf("%s-test-job-%s", e.Deploy.Name, randKey(5))
+	jobNamespace := e.Deploy.Namespace
+	testJob := v12.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      jobName,
+			Namespace: jobNamespace,
+		},
+		Spec: e.Deploy.Spec.TestSpec,
+	}
+
+	if err := e.Create(ctx, &testJob); err != nil {
+		return errors.Wrap(err, "failed to initiate test")
+	}
+	defer func() {
+		deletePolicy := metav1.DeletePropagationBackground // clean up pods in background
+		if err := e.Delete(ctx, &testJob, &client.DeleteOptions{
+			PropagationPolicy: &deletePolicy,
+		}); err != nil {
+			e.log.Error(err, "Failed to cleanup job")
+		}
+	}()
+	if err := e.awaitJobCompletion(ctx, &testJob); err != nil {
+		return errors.Wrap(err, "tests failed")
+	}
+	e.log.Info("Tests finished successfully")
 	return nil
+}
+
+func (e *DeployEngine) awaitJobCompletion(ctx context.Context, job *v12.Job) error {
+	key := types.NamespacedName{Namespace: job.Namespace, Name: job.Name}
+	timeout := 5 * time.Minute // todo configurable
+	for start := time.Now(); time.Since(start) < timeout; {
+		<-time.After(10 * time.Second)
+		if err := e.Get(ctx, key, job); err != nil {
+			return errors.Wrap(err, "failed waiting for job completion")
+		}
+		for _, cond := range job.Status.Conditions {
+			if cond.Type == v12.JobComplete && cond.Status == v1.ConditionTrue {
+				return nil
+			} else if cond.Type == v12.JobFailed && cond.Status == v1.ConditionTrue {
+				return errors.Errorf("job failed: %s", cond.Reason)
+			}
+		}
+	}
+	return errors.Errorf("timed out waiting for job completion")
 }
 
 func (e *DeployEngine) SetStatus(ctx context.Context, status string) {
@@ -416,6 +481,16 @@ func (e *DeployEngine) cleanup(ctx context.Context, name types.NamespacedName) {
 			e.log.Error(err, "Failed to delete replicaset")
 		}
 	}
+}
+
+func (e *DeployEngine) updateDeploy(ctx context.Context, mut func(*clusterv1alpha1.BlueGreenDeployment)) error {
+	return errors.Wrap(retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		if err := e.Get(ctx, e.name, e.Deploy); err != nil {
+			return errors.Wrap(err, "failed to get deploy with retry")
+		}
+		mut(e.Deploy)
+		return e.Update(ctx, e.Deploy)
+	}), "failed to update with retry")
 }
 
 func (e *DeployEngine) updateDeployStatus(ctx context.Context, mut func(*clusterv1alpha1.BlueGreenDeployment)) error {
