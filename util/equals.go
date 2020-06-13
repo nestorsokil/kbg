@@ -1,11 +1,12 @@
-package controllers
+package util
 
 import (
+	"github.com/nestorsokil/kbg/controllers"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 )
 
-func podEquals(template1, template2 *v1.PodTemplateSpec) bool {
+func PodEquals(template1, template2 *v1.PodTemplateSpec) bool {
 	// TODO this still sucks
 
 	t1Copy := template1.DeepCopy()
@@ -13,9 +14,9 @@ func podEquals(template1, template2 *v1.PodTemplateSpec) bool {
 	specs := []*v1.PodTemplateSpec{t1Copy, t2Copy}
 	for i := range specs {
 		delete(specs[i].Labels, "pod-template-hash")
-		delete(specs[i].Labels, LabelColor)
-		delete(specs[i].Labels, LabelName)
-		delete(specs[i].Labels, LabelApp)
+		delete(specs[i].Labels, controllers.LabelColor)
+		delete(specs[i].Labels, controllers.LabelName)
+		delete(specs[i].Labels, controllers.LabelApp)
 
 		spec := &specs[i].Spec
 
@@ -55,7 +56,7 @@ func podEquals(template1, template2 *v1.PodTemplateSpec) bool {
 	return equality.Semantic.DeepEqual(t1Copy, t2Copy)
 }
 
-func svcEquals(svc1, svc2 *v1.ServiceSpec) bool {
+func SvcEquals(svc1, svc2 *v1.ServiceSpec) bool {
 	s1 := svc1.DeepCopy()
 	s2 := svc2.DeepCopy()
 	svcs := []*v1.ServiceSpec{s1, s2}

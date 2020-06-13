@@ -1,4 +1,4 @@
-package controllers
+package util
 
 import (
 	"math/rand"
@@ -14,7 +14,7 @@ const (
 
 var src = rand.NewSource(time.Now().UnixNano())
 
-func randKey(length int) string {
+func RandKey(length int) string {
 	b := make([]byte, length)
 	for i, cache, remain := length-1, src.Int63(), letterIdxMax; i >= 0; {
 		if remain == 0 {
