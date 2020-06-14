@@ -96,7 +96,6 @@ No resources found in test namespace.
 
 - HPA support (untested)
 - Default/Validating webhooks (untested)
-- Fix all TODOs
 - Sync mode (hook into admission?) to fail the update if tests fail
 - RBAC, tested in "privileged" mode
 - Unit/Integration testing, then refactoring

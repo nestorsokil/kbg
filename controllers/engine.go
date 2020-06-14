@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"github.com/go-logr/logr"
 	clusterv1alpha1 "github.com/nestorsokil/kbg/api/v1alpha1"
-	"github.com/nestorsokil/kbg/util"
 	"github.com/pkg/errors"
 	appsv1 "k8s.io/api/apps/v1"
 	v12 "k8s.io/api/batch/v1"
@@ -94,12 +93,12 @@ type DeployEngine struct {
 
 // ActiveMatchesSpec returns true when active ReplicaSet matches desired Spec
 func (e *DeployEngine) ActiveMatchesSpec() bool {
-	return util.PodEquals(&e.Active.Spec.Template, &e.Deploy.Spec.Template)
+	return podEquals(&e.Active.Spec.Template, &e.Deploy.Spec.Template)
 }
 
 // ActiveMatchesSpec returns true when backup ReplicaSet matches desired Spec
 func (e *DeployEngine) BackupMatchesSpec() bool {
-	return util.PodEquals(&e.Backup.Spec.Template, &e.Deploy.Spec.Template)
+	return podEquals(&e.Backup.Spec.Template, &e.Deploy.Spec.Template)
 }
 
 func (e *DeployEngine) OverrideColor() *string {
@@ -207,7 +206,7 @@ func (e *DeployEngine) RunTestsOnBackup(ctx context.Context) error {
 		e.log.Info("No tests specified, skipping")
 		return nil
 	}
-	jobName := fmt.Sprintf("%s-test-job-%s", e.Deploy.Name, util.RandKey(5))
+	jobName := fmt.Sprintf("%s-test-job-%s", e.Deploy.Name, randKey(5))
 	jobNamespace := e.Deploy.Namespace
 	testJob := v12.Job{
 		ObjectMeta: metav1.ObjectMeta{
@@ -318,7 +317,7 @@ func (e *DeployEngine) ensureService(ctx context.Context, target *v1.Service, ex
 	key := client.ObjectKey{Namespace: e.Deploy.Namespace, Name: expectedName}
 	err := e.Get(ctx, key, target)
 	if err == nil {
-		if !util.SvcEquals(&target.Spec, &e.Deploy.Spec.Service) {
+		if !svcEquals(&target.Spec, &e.Deploy.Spec.Service) {
 			e.log.Info("Detected Service change, updating")
 			svcCopy := e.ActiveSvc.DeepCopy()
 			if svcCopy.Spec.Type != e.Deploy.Spec.Service.Type {

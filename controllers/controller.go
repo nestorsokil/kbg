@@ -54,7 +54,7 @@ func (r *BlueGreenDeploymentReconciler) Reconcile(req ctrl.Request) (ctrl.Result
 	}
 
 	switch {
-	case eng.CurrentStatus() == clusterv1alpha1.StatusDeployFailed:
+	case eng.Deploy.Status.StatusName == clusterv1alpha1.StatusDeployFailed:
 		if err := eng.updateDeploy(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
 			d.Spec.Template = eng.Active.Spec.Template
 		}); err != nil {
