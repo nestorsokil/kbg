@@ -28,6 +28,10 @@ namespace/test created
 ~/ kubectl apply -f config/samples/cluster_v1alpha1_bluegreendeployment.yaml -n test
 bluegreendeployment.cluster.kbg/myserver created
 
+~/ kubectl get kbg -n test
+NAME       COLOR   STATUS    ACTIVE   BACKUP   AGE
+myserver   blue    Unknown   0        0        8s
+
 ~/ kubectl get all -n test
 NAME                       READY   STATUS    RESTARTS   AGE
 pod/myserver-blue-6w6st    1/1     Running   0          34s
@@ -43,8 +47,8 @@ replicaset.apps/myserver-blue    2         2         2       34s
 replicaset.apps/myserver-green   1         1         1       34s
 
 ~/ kubectl get kbg -n test
-NAME       COLOR   STATUS    ACTIVE   BACKUP
-myserver   blue    Nominal   2        1
+NAME       COLOR   STATUS    ACTIVE   BACKUP   AGE
+myserver   blue    Nominal   2        1        38s
 ```
 
 Update the Nginx version in the sample
@@ -58,8 +62,8 @@ containers:
 bluegreendeployment.cluster.kbg/myserver configured
 
 ~/ kubectl get kbg -n test
-NAME       COLOR   STATUS     ACTIVE   BACKUP
-myserver   blue    Deploying  2        1
+NAME       COLOR   STATUS     ACTIVE   BACKUP   AGE
+myserver   blue    Deploying  2        1        13m
 
 ~/ kubectl get all -n test
 NAME                       READY   STATUS    RESTARTS   AGE
@@ -76,8 +80,8 @@ replicaset.apps/myserver-blue    1         1         1       13m
 replicaset.apps/myserver-green   2         2         2       2m37s
 
 ~/ kubectl get kbg -n test
-NAME       COLOR   STATUS    ACTIVE   BACKUP
-myserver   green   Nominal   2        1
+NAME       COLOR   STATUS    ACTIVE   BACKUP   AGE
+myserver   green   Nominal   2        1        14m
 
 ~/ curl -sD - 127.0.0.1:30697 -o /dev/null | grep Server
 Server: nginx/1.19.0
@@ -95,8 +99,8 @@ spec:
 bluegreendeployment.cluster.kbg/myserver configured
 
 ~/ kubectl get kbg -n test
-NAME       COLOR   STATUS       ACTIVE   BACKUP
-myserver   blue    Overridden   2        1
+NAME       COLOR   STATUS       ACTIVE   BACKUP   AGE
+myserver   blue    Overridden   2        1        17m
 ```
 
 Clean up
