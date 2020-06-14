@@ -56,6 +56,9 @@ func (r *BlueGreenDeployment) Default() {
 	if r.Spec.BackupScaleDownPercent == nil {
 		r.Spec.BackupScaleDownPercent = &DefaultScaleDownPercent
 	}
+	if r.Spec.SwapStrategy == "" {
+		r.Spec.SwapStrategy = ScaleThenSwap
+	}
 }
 
 // +kubebuilder:webhook:verbs=create;update,path=/validate-cluster-kbg-v1alpha1-bluegreendeployment,mutating=false,failurePolicy=fail,groups=cluster.kbg,resources=bluegreendeployments,versions=v1alpha1,name=vbluegreendeployment.kb.io

@@ -114,6 +114,7 @@ func (e *DeployEngine) IsActive(color string) bool {
 }
 
 func (e *DeployEngine) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired *int32) error {
+	// TODO skip if number of pods already == desired
 	if err := e.updateReplicaSet(ctx, rs, func(rs *appsv1.ReplicaSet) {
 		rs.Spec.Replicas = desired
 	}); err != nil {
@@ -126,11 +127,13 @@ func (e *DeployEngine) Scale(ctx context.Context, rs *appsv1.ReplicaSet, desired
 }
 
 func (e *DeployEngine) Swap(ctx context.Context) error {
-	if err := e.Scale(ctx, e.Backup, e.activeReplicasDesired); err != nil {
-		return errors.Wrap(err, "failed to scale")
+	if e.Deploy.Spec.SwapStrategy == clusterv1alpha1.ScaleThenSwap {
+		if err := e.Scale(ctx, e.Backup, e.activeReplicasDesired); err != nil {
+			return errors.Wrap(err, "failed to scale")
+		}
 	}
 
-	// TODO retry
+	// TODO retry/rollback?
 	e.ActiveSvc.Spec.Selector[LabelColor] = e.Backup.Labels[LabelColor]
 	if err := e.Client.Update(ctx, e.ActiveSvc); err != nil {
 		return errors.Wrap(err, "unable to Swap")
@@ -144,6 +147,12 @@ func (e *DeployEngine) Swap(ctx context.Context) error {
 	temp := e.Active
 	e.Active = e.Backup
 	e.Backup = temp
+
+	if e.Deploy.Spec.SwapStrategy == clusterv1alpha1.SwapThenScale {
+		if err := e.Scale(ctx, e.Active, e.activeReplicasDesired); err != nil {
+			return errors.Wrap(err, "failed to scale")
+		}
+	}
 
 	if e.Backup.Spec.Replicas != e.backupReplicasDesired {
 		if err := e.Scale(ctx, e.Backup, e.backupReplicasDesired); err != nil {
@@ -266,6 +275,7 @@ func (e *DeployEngine) getDeployment(ctx context.Context) error {
 	if err := e.Client.Get(ctx, e.name, e.Deploy); err != nil {
 		return err
 	}
+	// TODO these default should be handled by defaulting admission webhook
 	if e.Deploy.Status.ActiveColor == "" || e.Deploy.Status.StatusName == "" {
 		if err := e.updateDeployStatus(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
 			if d.Status.ActiveColor == "" {
@@ -278,6 +288,22 @@ func (e *DeployEngine) getDeployment(ctx context.Context) error {
 			}
 		}); err != nil {
 			return errors.Wrap(err, "failed to set status")
+		}
+	}
+
+	if e.Deploy.Spec.SwapStrategy == "" || e.Deploy.Spec.BackupScaleDownPercent == nil {
+		if err := e.updateDeploy(ctx, func(d *clusterv1alpha1.BlueGreenDeployment) {
+			if e.Deploy.Spec.SwapStrategy == "" {
+				e.log.Info(fmt.Sprintf("No swap strategy, defaulting to %s", clusterv1alpha1.ScaleThenSwap))
+				e.Deploy.Spec.SwapStrategy = clusterv1alpha1.ScaleThenSwap
+			}
+			if e.Deploy.Spec.BackupScaleDownPercent == nil {
+				var defaultScaleDown int32 = 50
+				e.log.Info(fmt.Sprintf("No scaleDownPercent, setting to %d", defaultScaleDown))
+				e.Deploy.Spec.BackupScaleDownPercent = &defaultScaleDown
+			}
+		}); err != nil {
+			return errors.Wrap(err, "failed to set defaults")
 		}
 	}
 	return nil

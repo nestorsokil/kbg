@@ -5,7 +5,8 @@ metadata:
 spec:
   replicas: 2
   backupScaleDownPercent: 50
-  #overrideColor: green
+  swapStrategy: ScaleThenSwap  # SwapThenScale, ScaleThenSwap
+  #overrideColor: green  # blue, green
   service:
     type: NodePort
     ports:

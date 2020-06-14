@@ -83,6 +83,22 @@ myserver   green   Nominal   2        1
 Server: nginx/1.19.0
 ```
 
+For instant rollback set these values
+```yaml
+spec:
+  swapStrategy: SwapThenScale
+  overrideColor: blue 
+```
+
+```bash
+~/ kubectl apply -f config/samples/cluster_v1alpha1_bluegreendeployment.yaml -n test
+bluegreendeployment.cluster.kbg/myserver configured
+
+~/ kubectl get kbg -n test
+NAME       COLOR   STATUS       ACTIVE   BACKUP
+myserver   blue    Overridden   2        1
+```
+
 Clean up
 ```bash
 ~/ kubectl delete kbg --all -n test
@@ -98,6 +114,7 @@ No resources found in test namespace.
 - Default/Validating webhooks (untested)
 - Sync mode (hook into admission?) to fail the update if tests fail
 - RBAC, tested in "privileged" mode
+- Fix all TODOs
 - Unit/Integration testing, then refactoring
 
 ## References

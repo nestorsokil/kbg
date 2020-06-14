@@ -37,6 +37,8 @@ type BlueGreenDeploymentSpec struct {
 	Replicas               *int32 `json:"replicas"`
 	BackupScaleDownPercent *int32 `json:"backupScaleDownPercent"`
 	// +optional
+	SwapStrategy SwapStrategy `json:"swapStrategy"`
+	// +optional
 	OverrideColor *string `json:"overrideColor,omitempty"`
 }
 
@@ -48,6 +50,13 @@ const (
 	StatusOverridden   = "Overridden"
 	StatusDeploying    = "Deploying"
 	StatusDeployFailed = "Failed"
+)
+
+type SwapStrategy string
+
+const (
+	ScaleThenSwap = "ScaleThenSwap"
+	SwapThenScale = "SwapThenScale"
 )
 
 const (
